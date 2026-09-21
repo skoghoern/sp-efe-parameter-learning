@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Generated run outputs (the committed .npz arrays are tracked explicitly)
+figures/*.png
+figures/*.gif
