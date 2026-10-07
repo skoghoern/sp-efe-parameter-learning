@@ -6,12 +6,12 @@ works with probability ``gate_p`` and whose failure is absorbing; the
 unmapped part (flat Dirichlet columns) contains the deterministic route.
 So
 
-- ``pref-sp(-plan)`` has a known route that is good enough to switch its
-  posterior-mean optimism off (a flat column looks like a 1/N teleport,
+- ``SP-Pref`` and ``SP-Pref-Plan`` have a known route that is good enough to
+  switch posterior-mean optimism off (a flat column looks like a 1/N teleport,
   which is worth less than the gate as long as ``gate_p`` is clearly above
-  ``1 − (1 − 1/N)^(H−1)``), and it has no epistemic term for B: it should
-  sit at ``gate_p`` with a bit-identical B̂ on the unmapped columns;
-- ``coupled-*`` is drawn into the unmapped region by Δ_B, which is
+  ``1 − (1 − 1/N)^(H−1)``), and neither has an epistemic term for B: both
+  should sit at ``gate_p`` with a bit-identical B̂ on the unmapped columns;
+- ``SP-EFE`` is drawn into the unmapped region by Δ_B, which is
   survivable there (no unmapped cell neighbours the dead end), learns the
   columns, and — once Δ_B has decayed — exploits the deterministic
   detour at 1.00.
@@ -27,7 +27,7 @@ Two layouts (``s = x + y * grid_x``, y pointing up):
 
   Shortcut ``→→→→↑`` (5 steps, w.p. ``gate_p``); detour ``↑↑→→→→↓`` (7,
   deterministic). The detour is the action-index-order walk (N, then E),
-  which is what lets *uncorrected* ``pref-sp`` find it: its action-entropy
+  which is what lets *uncorrected* ``SP-Pref`` find it: its action-entropy
   bonus pulls it into the flat columns and index-order tie-breaks walk it
   along the top row.
 

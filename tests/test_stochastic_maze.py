@@ -1,4 +1,4 @@
-"""Tests for the stochastic maze environment and its coupled-mp scenarios.
+"""Tests for the stochastic maze environment and its SP-EFE scenarios.
 
 The maze is ported from the RxInferExamples.jl notebook ``EFE Minimization
 via Message Passing.ipynb`` (5x5 grid, drift cells, noisy observations).
@@ -12,7 +12,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 class TestStochasticMazeTensors:
-    """Validate the ported notebook tensors."""
+    """Validate the maze tensors."""
 
     def setup_method(self):
         from environments.stochastic_maze import (
@@ -119,7 +119,7 @@ class TestStochasticMazeTensors:
 
     def test_safe_top_row_path(self):
         """The 8-step path along the top row is deterministic and its
-        observations are exact (the notebook's 'longer, secure path')."""
+        observations are exact (the longer deterministic path)."""
         from environments.stochastic_maze import (
             GOAL_XY, START_XY, state_to_xy, xy_to_state,
         )
@@ -264,7 +264,7 @@ class TestStochasticMazeEnv:
 
 
 # ---------------------------------------------------------------------------
-# Coupled-mp integration tests
+# SP-EFE integration tests
 # ---------------------------------------------------------------------------
 
 class TestStochasticMazeCoupledIntegration:
@@ -277,31 +277,28 @@ class TestStochasticMazeCoupledIntegration:
             assert r["steps"] <= 20   # 8 = safe path; drift can be shorter
 
     def test_pref_sp_lured_into_risky_row(self):
-        """The default drift layout is designed so the soft-Bellman KL
-        planner (pref-sp additive) enters the drift row from the start,
-        while coupled-mp's ambiguity term sends it up the safe top row.
-        Adding the planning correction (r(u|x) channel + hard-min sweep)
-        to pref-sp removes the sink's action-entropy bonus and flips it to
-        the safe route as well."""
+        """The default drift layout is designed so the preference-driven
+        planners enter the drift row from the start. Under the unary
+        per-step preference (exponential utility) the conveyor's pull makes
+        the risky row look cheap and both SP-Pref variants head East, while
+        SP-EFE's ambiguity term still sends it up the safe top row."""
         import jax.numpy as jnp
         from environments.stochastic_maze import build_A, build_B, build_D, build_goal
         from agent import CLAMP
         from run_fog_walls import DEFAULT_HORIZON
-        from spmp.sp_pref import sp_pref_planning
-        from spmp.sp_efe import sp_efe_planning
+        from spmp.sp_efe import sp_efe_planning, paper_scheme
         aA, aB = jnp.asarray(CLAMP * build_A()), jnp.asarray(CLAMP * build_B())
         goal, q0 = jnp.asarray(build_goal(4.0)), jnp.asarray(build_D())
-        pref, *_ = sp_pref_planning(
-            q0, aA, aB, goal, DEFAULT_HORIZON, 100, damping=0.5,
-            per_step_goal="additive")
-        plan, *_ = sp_pref_planning(
-            q0, aA, aB, goal, DEFAULT_HORIZON, 100, damping=0.5,
-            per_step_goal="additive", planning_correction=True)
-        cp, *_ = sp_efe_planning(
-            q0, aA, aB, goal, DEFAULT_HORIZON, 100, damping=0.5,
-            per_step_goal="additive")
+
+        def plan_with(planner):
+            return sp_efe_planning(
+                q0, aA, aB, goal, horizon=DEFAULT_HORIZON, n_iterations=100,
+                damping=0.5, per_step_goal=True,
+                scheme=paper_scheme(planner)).action_dist
+
+        pref, plan, cp = (plan_with(p) for p in ("SP-Pref", "SP-Pref-Plan", "SP-EFE"))
         assert int(np.argmax(pref)) == 1    # EAST into the conveyor
-        assert int(np.argmax(plan)) == 0   # NORTH once corrected
+        assert int(np.argmax(plan)) == 1    # EAST, correction cannot fix it
         assert int(np.argmax(cp)) == 0    # NORTH toward the safe top row
 
     def test_pref_sp_planning_correction_terminal_only(self):
@@ -312,14 +309,16 @@ class TestStochasticMazeCoupledIntegration:
         from environments.stochastic_maze import build_A, build_B, build_D, build_goal
         from agent import CLAMP
         from run_fog_walls import DEFAULT_HORIZON
-        from spmp.sp_pref import sp_pref_planning
+        from spmp.sp_efe import sp_efe_planning, paper_scheme
         aA, aB = jnp.asarray(CLAMP * build_A()), jnp.asarray(CLAMP * build_B())
         goal, q0 = jnp.asarray(build_goal(4.0)), jnp.asarray(build_D())
-        pref, *_ = sp_pref_planning(
-            q0, aA, aB, goal, DEFAULT_HORIZON, 100, damping=0.5)
-        plan, *_ = sp_pref_planning(
-            q0, aA, aB, goal, DEFAULT_HORIZON, 100, damping=0.5,
-            planning_correction=True)
+
+        def plan_with(planner):
+            return sp_efe_planning(
+                q0, aA, aB, goal, horizon=DEFAULT_HORIZON, n_iterations=100,
+                damping=0.5, scheme=paper_scheme(planner)).action_dist
+
+        pref, plan = plan_with("SP-Pref"), plan_with("SP-Pref-Plan")
         assert np.ptp(np.asarray(pref)) < 0.05          # near-uniform
         assert int(np.argmax(plan)) in (0, 2)          # NORTH/SOUTH (symmetric)
         assert float(plan[1]) < 1e-3                   # no EAST
@@ -328,7 +327,7 @@ class TestStochasticMazeCoupledIntegration:
     def test_analytic_rejected_at_maze_horizon(self):
         from run_fog_walls import run_scenario
         try:
-            run_scenario("known", n_episodes=1, planner="analytic-efe",
+            run_scenario("known", n_episodes=1, planner="EFE",
                          maze="trap", quiet=True, collect_frames=False)
             assert False, "expected ValueError"
         except ValueError as exc:

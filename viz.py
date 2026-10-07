@@ -6,7 +6,7 @@ both share one visual vocabulary. This is here for inspecting a single episode:
 belief q(x), the action posterior q(u), and the matrix being learned.
 
 Frames come from ``run_scenario(collect_frames=True)``. Cell (x, y) is drawn at
-plot coordinates (x+.5, y+.5) with y pointing up, matching the notebook.
+plot coordinates (x+.5, y+.5), with y pointing up.
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def save_gif(result, path, interval_ms=None, hold_frames=3):
     act_ax = fig.add_subplot(gs[0, 1])
     mat_ax = fig.add_subplot(gs[1, :])
     fig.suptitle(f"Stochastic maze ({result.get('maze', 'trap')}) — "
-                 f"{result.get('planner', 'coupled-mp')}"
+                 f"{result.get('planner', 'SP-EFE')}"
                  f" — {scenario}  (H={result['horizon']}"
                  f"{'↓' if result.get('shrinking_horizon') else ''})",
                  fontweight="bold")

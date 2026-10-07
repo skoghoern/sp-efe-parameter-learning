@@ -1,576 +1,525 @@
-"""SP-EFE: the paper's message passing scheme. Start here.
+"""SP-EFE planning by sum-product message passing.
 
-EFE-based planning runs as sum-product message passing on the POMDP chain, with
-each entropy correction of the objective absorbed into a factor kernel as a
-*channel reparameterization*. Two kernels carry the whole scheme:
+Each entropy correction of the expected free energy is a channel in a factor
+kernel. Likelihood tables are posterior means, log(α / α₀):
 
-    log g_obs(y, x)     = log Ã + log r(y|x)  + coef · Δ_A
-    log g_dyn(x', x, u) = log B̃ + Δ_B + log r(u|x) − log r(x'|x, u)
+    log g_obs(y, x)     = log m_A + log r(y|x) + c · Δ_A              observation_kernel
+    log g_dyn(x', x, u) = log m_B + Δ_B + log r(u|x) − log r(x'|x, u)   dynamics_kernel
 
-where
+Δ_A and Δ_B are the per-entry information gains (``info_gain.py``). The
+channels are the closed-form conditionals of q, refreshed after each sweep
+(``refresh_channels``):
 
-    Ã, B̃    "+1" joint-average Dirichlet tables, ψ(α+1) − ψ(α_0+1)
-    Δ_A, Δ_B per-entry information gain, KL(Dir(α+e) ‖ Dir(α+n̄)); as e^Δ ≥ 1
-             these are the paper's information-gain weights (``info_gain.py``)
-    r(y|x)   observation channel      -> the ambiguity correction
-    r(u|x)   policy channel           -> the planning correction Σ H[q(u|x)]
-    r(x'|x,u) dynamics channel        -> the state information gain
+    r(y|x)      ambiguity
+    r(u|x)      planning correction, Σ H[q(u|x)]
+    r(x'|x, u)  state information gain
 
-The channels are not free parameters: each is substituted at its closed-form
-optimum, the corresponding conditional of q, so a sweep is plain sum-product and
-the channels are refreshed from the beliefs it produces. Iterating
-{sweep → refresh → damp} to a fixed point is the planner; uniform channels
-recover standard Bethe BP.
+Uniform channels recover standard Bethe belief propagation, which is the
+preference-only baseline SP-Pref; SP-Pref-Plan keeps only r(u|x). Every row
+of the paper's table is ``sp_efe_planning`` under a ``Scheme``; ``PAPER_ROWS``
+lists them. q(θ) stays frozen during a plan; the count update is in
+``agent.py``. ``demo_sweep.py`` prints every quantity below on a five-cell
+corridor and is the place to start.
 
-Reading order in this file:
+Notation -- axis order is (T, x', x, u) everywhere, as in ``sweeps.py`` and
+``info_gain.py``:
 
-    single_objective_terms / evaluate_single_objective
-        the scalar objective F, term by term (diagnostics only; planning never
-        needs it, and the drivers leave ``track_objective=False``)
-    _converge_obs_channels
-        the obs channel r(y|x) fixed point, which is independent of the chain
-        and so converges once up front
-    _planning_core
-        the main loop: forward_pass, backward_pass, then refresh r(u|x) and
-        r(x'|x,u) from the dynamics region beliefs and damp
-    sp_efe_planning
-        public entry point; ``coupled_planner_kwargs`` maps a planner name onto
-        the three static flags that select SP-EFE or one of its ablations
+    x_t ∈ {1..S}   state; x = x_{t-1} conditions, x' = x_t is the successor
+    u_t ∈ {1..U}   action
+    y   ∈ {1..C}   outcome of observation factor f ∈ {1..F}
+    T              planning horizon; t = 0 is the current state
+    m_A, m_B       posterior-mean tables     log_m_A (F, C, S)   log_m_B (S, S, U)
+    r(y|x)         ambiguity channel         log_r_yx (F, C, S)
+    r(u|x)         planning channel          log_r_ux (T, S, U)
+    r(x'|x, u)     state-IG channel          log_r_xxu (T, S, S, U)
+    Δ_A, Δ_B       information gains         delta_A (F, C, S)   delta_B (T, S, S, U)
+    n̄_B            fractional counts         nbar_B (T, S, S, U)
+    μ→, μ←         forward/backward msgs     log_fwd, log_bwd (T+1, S)
+    φ_t(x)         unary factor at node t    log_unary_* (T+1, S): obs→x message,
+                                             plus the preference when per-step
 
-Two subtleties worth knowing. The likelihood tables are the "+1" digammas
-ψ(α+1) − ψ(α_0+1) rather than the mean-field ψ(α) − ψ(α_0), because the energies
-must be evaluated under the same Bayes-recoupled measure the Δ terms use; the
-mean-field tables carry a per-column mass deficit ≈ (C−1)/α_0 that swamps the
-tilts at low counts. And the obs tilt enters at first power because the energy
-already contains the recoupled ambiguity entropy, so adding the coupled
-correction on top would count −I_A twice. (The entry point passes
-``obs_tilt_coef=2`` for the prior-faithful coupled objective; see there.)
-
-Point-mass limit (counts → ∞): Δ → 0 pointwise, ψ(α+1) − ψ(α_0+1) → log θ*, and
-the kernels reduce to g_obs = A·r(y|x), g_dyn = B·r(u|x)/r(x'|x,u) — the
-fixed-parameter AIF-MP scheme.
-
-Learning is outside planning and outside this file: q(θ) is frozen during a
-plan, the centered epistemic scores integrate to zero against q(θ), so the
-parameter update is the plain conjugate count increment (see ``agent.py``).
-
-All computation is in log-space with LOG_ZERO guards for structural zeros.
+Computation is in log-space; LOG_ZERO marks structural zeros (invariant in
+``sweeps.py``).
 """
 
+from dataclasses import dataclass
 from functools import partial
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.scipy.special import logsumexp
+from jaxtyping import Array, Bool, Float
 
 from .sweeps import (
     LOG_ZERO,
     backward_pass,
     damp_log_channel,
     forward_pass,
+    is_live,
+    log_normalize,
     safe_log,
 )
 from .tables import dirichlet_log_tables
-from .info_gain import _uniform_over_valid, dirichlet_posterior_kl
+from .info_gain import dirichlet_posterior_kl, uniform_over_valid
 
 
-def _xlogy(q, log_v):
-    """q·log_v with the 0·log 0 = 0 convention.
+def weighted_log(q, log_v):
+    """q · log_v elementwise with the 0·log 0 = 0 convention.
 
-    Guards every objective contraction: beliefs are exact zeros wherever a
-    kernel/prior entry is LOG_ZERO (exp underflows to 0.0 in float32), so
-    masking on q > 0 suppresses the spurious q·(−1e10) products without
-    changing any live term.
+    Not scipy's ``xlogy``: the log is already taken. Beliefs are exact zeros
+    wherever a kernel entry is LOG_ZERO, so masking on q > 0 drops the
+    spurious q·(−1e12) products without touching any live term.
     """
     return jnp.where(q > 0.0, q * log_v, 0.0)
 
 
-# =============================================================================
-# Objective evaluation (Step 1) — the new capability of this variant
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Which corrections a planner keeps
+# -----------------------------------------------------------------------------
 
 
-def single_objective_terms(base_dyn, log_lik_B_k, delta_B, log_fwd, log_bwd,
-                           log_local, log_action_prior, log_q0, log_goal,
-                           obs_energy_x, obs_kl_x, obs_tilt_coef=1.0,
-                           per_step_goal=False):
-    """Named scalar terms of the single objective F⁗ (D.O-T⁗) at the current sweep.
+@dataclass(frozen=True)
+class Scheme:
+    """The corrections a planner keeps (paper Table 1). Defaults are SP-EFE.
 
-    Bethe convention: non-singleton blocks (obs, dyn) carry −H_block − E[log
-    kernel table]; singleton priors (q0, goal, action prior; p̂_y uniform and
-    dropped) enter as energies; variable counting numbers run over the
-    non-singleton blocks. The obs-block negative entropy and the ambiguity
-    correction +H[y_t|x_t] combine exactly into −H[q(x_t)] (chain rule), which
-    the counting terms offset to a net coefficient of 0 at the chain ends and
-    +1 at interior states — implemented as `x_entropy` below.
+    Each flag removes one correction from the kernels; ``paper_scheme`` maps
+    a paper label onto a ``Scheme``. Hashable, so it is a static jit argument.
 
-    All beliefs are rebuilt from the passed messages/kernels, so the function
-    is a pure evaluator: it never touches the iteration state.
-
-    Args:
-        base_dyn: (T, x_old, x_new, u) current dyn kernel log ḡ_dyn (D.31b⁗),
-            LOG_ZERO-masked
-        log_lik_B_k: (x_old, x_new, u) likelihood table in kernel layout,
-            LOG_ZERO-masked ("+1" for D2a; arithmetic mean for Option 2)
-        delta_B: (T, x_old, x_new, u) dyn contrast tables Δ_B ≥ 0 (0 at
-            structural zeros)
-        log_fwd, log_bwd: (T+1, S) current forward/backward messages
-        log_local: (T+1, S) obs→x messages
-        log_action_prior: (U,) log p(u)
-        log_q0: (S,) log initial state belief
-        log_goal: (S,) log state preference
-        obs_energy_x: (S,) per-state obs energy Σ_{f,y} r(y|x)·log table
-        obs_kl_x: (S,) per-state obs contrast Σ_{f,y} r(y|x)·Δ_A(f,y,x)
-        obs_tilt_coef: explicit obs IG coefficient in ΔF (1 for D2a
-            AMENDMENT 4; 2 for Option 2 / D.9a⁗ full corrections)
-        per_step_goal: if True, preference energy is Σ_{t=1..T} −E[log goal];
-            else only the terminal −E_{q(x_T)}[log goal]
-
-    Returns:
-        dict of named scalar contributions; their sum is F⁗ (minimized).
+    ``goal_in_sweeps`` is not a correction. It exists to keep the
+    preference-only baselines as published: with no θ-channel to carry the
+    per-step preference into the chain, SP-Pref and SP-Pref-Plan put it in the
+    forward/backward sweeps directly. SP-EFE keeps its sweeps observation-only
+    and lets the preference enter through the channel refresh.
     """
-    horizon = base_dyn.shape[0]
+    ambiguity: bool = True             # r(y|x) in g_obs
+    state_info_gain: bool = True       # r(x'|x,u) in g_dyn
+    planning_correction: bool = True   # r(u|x) in g_dyn
+    novelty_B: bool = True             # Δ_B in g_dyn
+    novelty_A_weight: int = 2          # c on Δ_A in g_obs; 0 drops it
+    goal_in_sweeps: bool = False       # per-step preference also in the sweeps
 
-    # State beliefs q(x_t) ∝ fwd·bwd·local, one per chain node
-    log_qx_un = log_fwd + log_bwd + log_local
-    log_qx = log_qx_un - logsumexp(log_qx_un, axis=1, keepdims=True)
+    def __post_init__(self):
+        if self.novelty_A_weight and not self.ambiguity:
+            raise ValueError("novelty_A needs the ambiguity channel: Δ_A is "
+                             "built from the r(y|x) fixed point")
+
+    @property
+    def refreshes_a_channel(self) -> bool:
+        """Whether anything in g_dyn is refreshed from the chain beliefs."""
+        return self.state_info_gain or self.planning_correction or self.novelty_B
+
+
+# Paper label -> (scheme, description), in the paper's row order. The README
+# table lists the same labels; a test keeps them in step.
+PAPER_ROWS: dict[str, tuple[Scheme, str]] = {
+    "SP-EFE-dyn": (Scheme(state_info_gain=False),
+                   "no dynamics channel"),
+    "SP-EFE": (Scheme(),
+               "full scheme: obs + dyn channels, Δ_A, Δ_B"),
+    "SP-EFE-DeltaB": (Scheme(novelty_B=False),
+                      "dynamics channel on, Δ_B off"),
+    "SP-EFE-DeltaA-DeltaB-dyn": (Scheme(state_info_gain=False, novelty_B=False,
+                                        novelty_A_weight=0),
+                                 "channels only, dynamics channel dropped too"),
+    "SP-EFE-DeltaA-DeltaB": (Scheme(novelty_B=False, novelty_A_weight=0),
+                             "channels only (ambiguity, no novelty)"),
+    "SP-Pref-Plan": (Scheme(ambiguity=False, state_info_gain=False,
+                            novelty_B=False, novelty_A_weight=0,
+                            goal_in_sweeps=True),
+                     "planning correction r(u|x) only"),
+    "SP-Pref": (Scheme(ambiguity=False, state_info_gain=False,
+                       planning_correction=False, novelty_B=False,
+                       novelty_A_weight=0, goal_in_sweeps=True),
+                "no corrections"),
+}
+SP_EFE_PLANNERS = ("SP-EFE-dyn", "SP-EFE", "SP-EFE-DeltaB")
+SP_EFE_IGC_PLANNERS = ("SP-EFE-DeltaA-DeltaB-dyn", "SP-EFE-DeltaA-DeltaB")
+SP_PREF_PLANNERS = ("SP-Pref", "SP-Pref-Plan")
+
+
+def paper_scheme(label: str) -> Scheme:
+    """The ``Scheme`` of a paper planner label."""
+    try:
+        return PAPER_ROWS[label][0]
+    except KeyError:
+        raise ValueError(f"unknown planner {label!r}; "
+                         f"expected one of {list(PAPER_ROWS)}") from None
+
+
+# -----------------------------------------------------------------------------
+# State
+# -----------------------------------------------------------------------------
+
+
+class PlanningProblem(NamedTuple):
+    """Everything fixed for the duration of one plan. Built by ``build_problem``."""
+    scheme: Scheme
+    horizon: int
+    per_step_goal: bool
+    damping: float
+    alpha_B: Float[Array, "S S U"]              # for Δ_B
+    log_m_B: Float[Array, "S S U"]
+    valid_B: Bool[Array, "S S U"]               # support of m_B
+    log_action_prior: Float[Array, "U"]
+    log_q0: Float[Array, "S"]
+    log_goal: Float[Array, "S"]
+    log_unary_sweep: Float[Array, "T+1 S"]      # φ_t seen by the sweeps
+    log_unary_refresh: Float[Array, "T+1 S"]    # φ_t seen by refresh and objective
+    obs_energy_x: Float[Array, "S"]             # Σ_{f,y} q(y|x) log m_A
+    obs_info_x: Float[Array, "S"]               # Σ_{f,y} q(y|x) Δ_A
+
+
+class SweepState(NamedTuple):
+    """What one sweep refreshes."""
+    log_r_xxu: Float[Array, "T S S U"]   # r(x'|x,u)
+    log_r_ux: Float[Array, "T S U"]      # r(u|x)
+    nbar_B: Float[Array, "T S S U"]      # n̄_B = q_t(x',u|x), count space
+    log_fwd: Float[Array, "T+1 S"]       # messages of the last sweep, for damping
+    log_bwd: Float[Array, "T+1 S"]
+
+
+class PlanResult(NamedTuple):
+    action_dist: Float[Array, "U"]                # q(u_1), the planner's output
+    q_u: Float[Array, "T U"]                      # q(u_t) for every planned step
+    q_x: Float[Array, "T+1 S"]                    # q(x_t) at the fixed point
+    log_g_dyn: Float[Array, "T S S U"]            # kernel implied by the final channels
+    state: SweepState
+    objective_trace: dict[str, Float[Array, "n_iterations"]] | None  # per term + "total"
+
+
+# -----------------------------------------------------------------------------
+# The two kernels and the channel refresh
+# -----------------------------------------------------------------------------
+
+
+def observation_kernel(
+    log_m_A: Float[Array, "F C S"],
+    log_r_yx: Float[Array, "F C S"] | float,  # scalar broadcasts; 0 without r(y|x)
+    delta_A: Float[Array, "F C S"] | float,   # scalar broadcasts; 0 without Δ_A
+    novelty_A_weight: float,
+    salience=0.0,
+) -> Float[Array, "F C S"]:
+    """log g_obs = log m_A + log r(y|x) + c·Δ_A (+ optional salience tilt)."""
+    log_g = log_m_A + log_r_yx + novelty_A_weight * delta_A + salience
+    return jnp.where(is_live(log_m_A), log_g, LOG_ZERO)
+
+
+def dynamics_kernel(
+    log_m_B: Float[Array, "S S U"],
+    delta_B,
+    log_r_ux: Float[Array, "T S U"],
+    log_r_xxu: Float[Array, "T S S U"],
+) -> Float[Array, "T S S U"]:
+    """log g_dyn = log m_B + Δ_B + log r(u|x) − log r(x'|x,u).
+
+    A collapsed channel entry (for example x' ≠ goal on the last step) is
+    clipped out rather than amplifying the kernel through −log r → +∞.
+    Structural zeros are already LOG_ZERO in log_m_B. ``delta_B`` may be the
+    scalar 0.0 when Δ_B is dropped.
+    """
+    ok = is_live(log_r_xxu)
+    log_g = log_m_B + delta_B + log_r_ux[:, None] - jnp.where(ok, log_r_xxu, 0.0)
+    return jnp.where(ok, log_g, LOG_ZERO)
+
+
+def information_gain_B(problem: PlanningProblem, nbar_B) -> Float[Array, "T S S U"]:
+    """Δ_B from the current fractional counts; 0 on structural zeros."""
+    delta = dirichlet_posterior_kl(problem.alpha_B[None], nbar_B,
+                                   axis=1, cond_axes=(0, 2))
+    return jnp.where(problem.valid_B, delta, 0.0)
+
+
+def converge_obs_channel(alpha_A, log_m_A, scheme: Scheme, n_iterations, damping,
+                         salience=0.0):
+    """Observation block: μ_obs→x, the conditional q(y|x), and Δ_A.
+
+    r(y|x) conditions on x only, so it does not depend on the chain and is
+    converged once. At the fixed point r(y|x) = q(y|x), and exponentiated it
+    is the fractional count n̄_A in Δ_A = KL(Dir(α+e_y) ‖ Dir(α+n̄)). Without
+    the ambiguity channel (SP-Pref) the kernel is m_A·e^salience, q(y|x) is
+    its normalization and Δ_A = 0. p̂(y) is uniform.
+    """
+    valid_A = is_live(log_m_A)
+
+    if not scheme.ambiguity:
+        log_g = observation_kernel(log_m_A, 0.0, 0.0, 0.0, salience)
+        log_q_yx = jnp.where(valid_A, log_normalize(log_g, axis=1), LOG_ZERO)
+        delta_A = jnp.zeros_like(log_m_A)
+    else:
+        def kernel(log_r_yx):
+            nbar = jnp.where(valid_A, jnp.exp(log_r_yx), 0.0)
+            delta = jnp.where(valid_A, dirichlet_posterior_kl(
+                alpha_A, nbar, axis=1, cond_axes=(0, 2)), 0.0)
+            return observation_kernel(log_m_A, log_r_yx, delta,
+                                      scheme.novelty_A_weight, salience), delta
+
+        def refresh(_, log_r_yx):
+            log_g, _ = kernel(log_r_yx)
+            return damp_log_channel(log_r_yx, log_normalize(log_g, axis=1),
+                                    damping, cond_axis=1)
+
+        log_q_yx = lax.fori_loop(0, n_iterations, refresh,
+                                 safe_log(uniform_over_valid(valid_A, axes=1)))
+        log_g, delta_A = kernel(log_q_yx)
+
+    # μ_obs→x = Π_f Σ_y g_obs(y, x) with uniform p̂(y)
+    log_obs_to_x = logsumexp(log_g, axis=1).sum(axis=0)
+    return log_normalize(log_obs_to_x, axis=0), log_q_yx, delta_A
+
+
+def refresh_channels(problem: PlanningProblem, state: SweepState,
+                     log_g_dyn, log_bwd) -> SweepState:
+    """Set each channel to its closed-form conditional of the block belief.
+
+    The block belief conditioned on x is m(x', u | x) ∝ g_dyn · μ←(x') · φ(x')
+    · p(u). All three refreshed quantities condition on x, so the forward
+    message cancels and is left out -- a LOG_ZERO forward entry would swamp
+    the slice in float32. Channels are damped geometrically, n̄_B linearly in
+    count space. A dropped channel keeps its uniform initialisation.
+    """
+    scheme, damping = problem.scheme, problem.damping
+    bwd_unary = log_bwd[1:] + problem.log_unary_refresh[1:]        # (T, x')
+    log_block = log_g_dyn + bwd_unary[:, :, None, None] + problem.log_action_prior
+    log_pair = logsumexp(log_block, axis=1)                          # (T, x, u)
+    joint = jnp.where(problem.valid_B, jax.nn.softmax(log_block, axis=(1, 3)), 0.0)
+
+    log_r_xxu = state.log_r_xxu
+    if scheme.state_info_gain:        # r(x'|x,u) ← norm_{x'} m
+        log_r_xxu = damp_log_channel(log_r_xxu, log_normalize(log_block, axis=1),
+                                     damping, cond_axis=1)
+    log_r_ux = state.log_r_ux
+    if scheme.planning_correction:    # r(u|x) ← norm_u Σ_{x'} m
+        log_r_ux = damp_log_channel(log_r_ux, log_normalize(log_pair, axis=2),
+                                    damping, cond_axis=2)
+    nbar_B = state.nbar_B
+    if scheme.novelty_B:              # n̄_B ← q_t(x',u|x)
+        nbar_B = (1.0 - damping) * nbar_B + damping * joint
+    return SweepState(log_r_xxu, log_r_ux, nbar_B, state.log_fwd, state.log_bwd)
+
+
+# -----------------------------------------------------------------------------
+# The objective, term by term
+# -----------------------------------------------------------------------------
+
+
+def objective_terms(problem: PlanningProblem, log_g_dyn, delta_B,
+                    log_fwd, log_bwd) -> dict[str, Float[Array, ""]]:
+    """Named terms of the planning objective at the current messages.
+
+    Their sum is the objective the scheme is built to minimize. Beliefs are
+    rebuilt from the passed messages. ``x_entropy`` is the net +H[q(x_t)] left
+    at interior chain states after the observation-block entropies cancel.
+
+    The trace is a diagnostic, not a descent certificate: with damped
+    messages and clipped channels the sum is not monotone in the sweep count,
+    and its fixed point depends on the damping.
+    """
+    unary = problem.log_unary_refresh
+    horizon = problem.horizon
+
+    # State beliefs q(x_t) ∝ μ→·μ←·φ, one per chain node
+    log_qx = log_normalize(log_fwd + log_bwd + unary, axis=1)
     qx = jnp.exp(log_qx)
 
-    # Dyn block beliefs q_trip,t(x_old, x_new, u) ∝ ḡ_dyn·fwd·bwd·p(u)
-    fwd_local = log_fwd[:-1] + log_local[:-1]
-    bwd_local = log_bwd[1:] + log_local[1:]
-    log_qt_un = (base_dyn
-                 + fwd_local[:, :, None, None]
-                 + bwd_local[:, None, :, None]
-                 + log_action_prior[None, None, None, :])
-    log_qt = log_qt_un - logsumexp(log_qt_un, axis=(1, 2, 3), keepdims=True)
+    # Dyn block beliefs q_t(x', x, u) ∝ g_dyn·μ→(x)φ(x)·μ←(x')φ(x')·p(u)
+    fwd_unary = log_fwd[:-1] + unary[:-1]  # (T, x)
+    bwd_unary = log_bwd[1:] + unary[1:]    # (T, x')
+    log_qt = log_normalize(
+        log_g_dyn + bwd_unary[:, :, None, None] + fwd_unary[:, None, :, None]
+        + problem.log_action_prior, axis=(1, 2, 3))
     qt = jnp.exp(log_qt)
+    log_qpair = logsumexp(log_qt, axis=1)  # (T, x, u), normalized
+    q_u = qt.sum(axis=(1, 2))              # (T, U)
 
-    # --- dyn blocks: −H[q_trip] − E_b[log p] and the three corrections ------
-    dyn_neg_entropy = _xlogy(qt, log_qt).sum()
-    dyn_energy = -_xlogy(qt, jnp.broadcast_to(log_lik_B_k[None],
-                                              qt.shape)).sum()
-    # −H[q(x'|x,u)]: the denominator-channel correction, from q_trip itself
-    log_cond_xnew = log_qt - logsumexp(log_qt, axis=2, keepdims=True)
-    dyn_state_entropy = _xlogy(qt, log_cond_xnew).sum()
-    # +H[q(u|x)]: the always-on planning correction
-    log_qpair = logsumexp(log_qt, axis=2)  # (T, x_old, u), normalized
-    log_cond_u = log_qpair - logsumexp(log_qpair, axis=2, keepdims=True)
-    dyn_plan_entropy = -_xlogy(jnp.exp(log_qpair), log_cond_u).sum()
-    # −E[Δ_B]: dyn parameter information gain (bonus, factor 1)
-    dyn_info = -(qt * delta_B).sum()
-    # −E[log p(u)]: action-prior energy
-    q_u = qt.sum(axis=(1, 2))  # (T, U)
-    dyn_action_energy = -_xlogy(
-        q_u, jnp.broadcast_to(log_action_prior[None], q_u.shape)).sum()
-
-    # --- obs blocks: −E[log table] − coef·E[Δ_A]; entropies → x_entropy ------
-    obs_energy = -(qx * obs_energy_x[None, :]).sum()
-    obs_info = -obs_tilt_coef * (qx * obs_kl_x[None, :]).sum()
-
-    # Net state-entropy terms: +H[q(x_t)] at interior chain states only
-    x_entropy = -_xlogy(qx[1:horizon], log_qx[1:horizon]).sum()
-
-    # --- singleton energies -------------------------------------------------
-    if per_step_goal:
-        # Preference on every future state x_1..x_T (matches pymdp per-step C)
-        goal_energy = -_xlogy(qx[1:], log_goal[None, :]).sum()
+    if problem.per_step_goal:
+        goal_energy = -weighted_log(qx[1:], problem.log_goal).sum()   # x_1..x_T
     else:
-        goal_energy = -_xlogy(qx[horizon], log_goal).sum()
-    init_energy = -_xlogy(qx[0], log_q0).sum()
+        goal_energy = -weighted_log(qx[horizon], problem.log_goal).sum()
 
     return {
-        "dyn_neg_entropy": dyn_neg_entropy,
-        "dyn_energy": dyn_energy,
-        "dyn_state_entropy": dyn_state_entropy,
-        "dyn_plan_entropy": dyn_plan_entropy,
-        "dyn_info": dyn_info,
-        "dyn_action_energy": dyn_action_energy,
-        "obs_energy": obs_energy,
-        "obs_info": obs_info,
-        "x_entropy": x_entropy,
+        # dyn blocks: −H[q_t] − E[log m_B] and the three corrections
+        "dyn_neg_entropy": weighted_log(qt, log_qt).sum(),
+        "dyn_energy": -weighted_log(qt, problem.log_m_B).sum(),
+        # −H[q(x'|x,u)]: the state-information-gain channel, from q_t itself
+        "dyn_state_entropy": weighted_log(qt, log_normalize(log_qt, axis=1)).sum(),
+        # +H[q(u|x)]: the planning correction
+        "dyn_plan_entropy": -weighted_log(jnp.exp(log_qpair),
+                                          log_normalize(log_qpair, axis=2)).sum(),
+        "dyn_info": -(qt * delta_B).sum(),                           # −E[Δ_B]
+        "dyn_action_energy": -weighted_log(q_u, problem.log_action_prior).sum(),
+        # obs blocks: −E[log m_A] − c·E[Δ_A]; their entropies → x_entropy
+        "obs_energy": -(qx * problem.obs_energy_x).sum(),
+        "obs_info": -problem.scheme.novelty_A_weight * (qx * problem.obs_info_x).sum(),
+        # +H[q(x_t)] at interior chain states only
+        "x_entropy": -weighted_log(qx[1:horizon], log_qx[1:horizon]).sum(),
         "goal_energy": goal_energy,
-        "init_energy": init_energy,
+        "init_energy": -weighted_log(qx[0], problem.log_q0).sum(),
     }
 
 
-def evaluate_single_objective(base_dyn, log_lik_B_k, delta_B, log_fwd, log_bwd,
-                              log_local, log_action_prior, log_q0, log_goal,
-                              obs_energy_x, obs_kl_x, obs_tilt_coef=1.0,
-                              per_step_goal=False):
-    """Scalar F⁗ = Σ of `single_objective_terms` (jit-safe)."""
-    terms = single_objective_terms(
-        base_dyn, log_lik_B_k, delta_B, log_fwd, log_bwd, log_local,
-        log_action_prior, log_q0, log_goal, obs_energy_x, obs_kl_x,
-        obs_tilt_coef=obs_tilt_coef, per_step_goal=per_step_goal)
-    total = jnp.asarray(0.0)
-    for v in terms.values():
-        total = total + v
-    return total
+# -----------------------------------------------------------------------------
+# One sweep, and the planner
+# -----------------------------------------------------------------------------
 
 
-# =============================================================================
-# Planning (Step 2)
-# =============================================================================
+def sweep(problem: PlanningProblem, state: SweepState, track_objective: bool):
+    """Assemble g_dyn, run forward/backward, refresh the channels.
 
-
-def _converge_obs_channels(alpha_A, log_lik_A, n_iterations, damping,
-                                  obs_tilt_coef=1, obs_salience=None):
-    """Converge the θ-free obs conditional r(y|x) and emit obs->x.
-
-    Single carry (plan "one refresh, two roles"): the block conditional
-    r(y|x) is both the self-consistent ambiguity factor in the kernel and,
-    exponentiated, the fractional counts n̄_A of the cavity Dir(α + n̄) that
-    Δ_A contrasts against. The refresh conditions on x over the y axis, so
-    the x-message cancels: obs channels are message-independent, identical at
-    all timesteps, and converged once outside the planning loop (same
-    argument as conjugate_aif._converge_obs_channels). p̂_y is uniform.
-
-    Per sweep:
-    - Δ_A(y,x) = KL(Dir(α+e_y) ‖ Dir(α+n̄)) from n̄_A = exp(log_r_yx)
-    - log_r_yx <- norm_y[ log table + log_r_yx + coef·Δ_A ]
-      coef=1 with "+1" tables (D2a); coef=2 with arithmetic tables (Option 2)
-
-    Args:
-        alpha_A:   (F, C, S) Dirichlet counts (for the Δ contrast)
-        log_lik_A: (F, C, S) likelihood table (joint "+1" or arithmetic mean)
-        n_iterations: convergence iterations
-        damping: geometric channel damping
-        obs_tilt_coef: integer power on Δ_A in the obs kernel (static)
-        obs_salience: optional (F, C, S) additive log-space tilt (e.g.
-            c·Δ_θ from `discrete_theta_salience`) applied alongside coef·Δ_A
-
-    Returns:
-        log_obs_to_x: (S,) normalized message from all obs factors to x
-        log_r_yx: (F, C, S) converged block conditional r(y|x)
-        delta_A: (F, C, S) converged contrast table Δ_A (0 at invalid entries)
+    Returns the new state and the per-sweep outputs ``(q_u, terms)`` that
+    ``lax.scan`` stacks; ``terms`` is None unless ``track_objective``.
     """
-    valid_A = log_lik_A > LOG_ZERO / 2
-    nbar0 = _uniform_over_valid(valid_A, axes=1)
-    log_r_yx = jnp.where(valid_A, safe_log(nbar0), LOG_ZERO)
-    coef = jnp.asarray(obs_tilt_coef, dtype=log_lik_A.dtype)
-    salience = (jnp.zeros_like(log_lik_A) if obs_salience is None
-                else obs_salience)
+    delta_B = information_gain_B(problem, state.nbar_B) if problem.scheme.novelty_B else 0.0
+    log_g_dyn = dynamics_kernel(problem.log_m_B, delta_B, state.log_r_ux, state.log_r_xxu)
 
-    def kernel(log_r_yx):
-        nbar = jnp.where(valid_A, jnp.exp(log_r_yx), 0.0)
-        delta = jnp.where(
-            valid_A,
-            dirichlet_posterior_kl(alpha_A, nbar, axis=1, cond_axes=(0, 2)),
-            0.0)
-        log_k = jnp.where(
-            valid_A, log_lik_A + log_r_yx + coef * delta + salience,
-            LOG_ZERO)
-        return log_k, delta
+    log_fwd = forward_pass(
+        log_g_dyn, problem.log_q0, problem.log_action_prior,
+        problem.log_unary_sweep, problem.horizon,
+        log_prev_fwd=state.log_fwd, msg_damping=problem.damping)
+    log_bwd, q_u = backward_pass(
+        log_g_dyn, log_fwd, problem.log_goal, problem.log_action_prior,
+        problem.log_unary_sweep, problem.horizon,
+        log_prev_bwd=state.log_bwd, msg_damping=problem.damping)
 
-    def body(i, log_r_yx):
-        log_k, _ = kernel(log_r_yx)
-        raw = log_k - logsumexp(log_k, axis=1, keepdims=True)
-        return damp_log_channel(log_r_yx, raw, damping, cond_axis=1)
-
-    log_r_yx = lax.fori_loop(0, n_iterations, body, log_r_yx)
-
-    # μ_obs→x = Σ_y ḡ_obs(y,x) with uniform p̂_y, product over obs factors
-    log_k, delta_A = kernel(log_r_yx)
-    log_obs_to_x = logsumexp(log_k, axis=1).sum(axis=0)  # (S,)
-    return log_obs_to_x - logsumexp(log_obs_to_x), log_r_yx, delta_A
+    new_state = refresh_channels(problem, state, log_g_dyn, log_bwd)
+    new_state = new_state._replace(log_fwd=log_fwd, log_bwd=log_bwd)
+    terms = (objective_terms(problem, log_g_dyn, delta_B, log_fwd, log_bwd)
+             if track_objective else None)
+    return new_state, (q_u, terms)
 
 
-def _planning_core(q_current_state, alpha_A, log_lik_A, alpha_B, log_lik_B,
-                   goal, horizon, n_iterations, damping, action_prior,
-                   track_objective, obs_tilt_coef=1, per_step_goal=False,
-                   obs_salience=None, dyn_channel=True, dyn_tilt_coef=1):
-    """Shared planning loop; raw alpha tensors are needed for the Δ contrasts.
-
-    ``dyn_channel=False`` ablates the conditional dyn channel r(x'|x,u) (the
-    −Σ H[q(x_t|x_{t-1},u_t)] state-info-gain correction): the channel stays
-    at its uniform initialisation, so the kernel is B̃·exp(Δ_B)·r(u|x).
-
-    ``dyn_tilt_coef=0`` drops the Dirichlet Δ_B tilt (parameter IG), leaving
-    the posterior-mean table B̃ in the dynamics numerator. Combined with
-    ``dyn_channel=True`` this is the MP analogue of analytic-efe-noamb-noig's
-    E[log B̂] term without −IG_B.
-    """
+def _check_inputs(q_current_state, alpha_A, alpha_B, goal, action_prior,
+                  horizon, scheme, per_step_goal):
+    """Trace-time validation; shapes are static so this costs nothing."""
     n_states = q_current_state.shape[0]
-    n_actions = log_lik_B.shape[2]
+    n_actions = alpha_B.shape[-1]
+    if horizon < 1:
+        raise ValueError(f"horizon must be >= 1, got {horizon}")
+    if per_step_goal and not (scheme.refreshes_a_channel or scheme.goal_in_sweeps):
+        raise ValueError("per_step_goal has no channel to enter through; "
+                         "set Scheme(goal_in_sweeps=True)")
+    if alpha_B.shape[:2] != (n_states, n_states):
+        raise ValueError(
+            f"alpha_B must be (S, S, U) with S={n_states}, got {alpha_B.shape}")
+    if alpha_A.ndim != 3 or alpha_A.shape[-1] != n_states:
+        raise ValueError(
+            f"alpha_A must be (F, C, S) with S={n_states}, got {alpha_A.shape}")
+    if goal.shape != (n_states,):
+        raise ValueError(f"goal must be (S,)={n_states}, got {goal.shape}")
+    if action_prior is not None and action_prior.shape != (n_actions,):
+        raise ValueError(
+            f"action_prior must be (U,)={n_actions}, got {action_prior.shape}")
 
-    if action_prior is None:
-        action_prior = jnp.ones(n_actions) / n_actions
-    log_action_prior = safe_log(action_prior)
 
-    log_q0 = safe_log(q_current_state)
+def build_problem(q_current_state, alpha_A, alpha_B, goal, *, horizon,
+                  n_iterations, scheme, damping, action_prior, obs_salience,
+                  per_step_goal) -> PlanningProblem:
+    """Tables, the converged observation block, and the unary factors."""
+    n_states, n_actions = alpha_B.shape[1:]
+    _, log_m_A = dirichlet_log_tables(alpha_A, axis=1)
+    _, log_m_B = dirichlet_log_tables(alpha_B, axis=0)
     log_goal = safe_log(goal)
 
-    # (x_old, x_new, u) kernel convention, as in the other planners
-    log_lik_B_k = log_lik_B.transpose(1, 0, 2)
-    valid_B_k = log_lik_B_k > LOG_ZERO / 2  # static structural mask
+    log_obs_to_x, log_q_yx, delta_A = converge_obs_channel(
+        alpha_A, log_m_A, scheme, n_iterations, damping,
+        salience=0.0 if obs_salience is None else obs_salience)
+    q_yx = jnp.where(is_live(log_q_yx), jnp.exp(log_q_yx), 0.0)
 
-    # Time-independent obs channel -> single obs->x message for all t
-    log_obs_to_x, log_r_yx, delta_A = _converge_obs_channels(
-        alpha_A, log_lik_A, n_iterations, damping, obs_tilt_coef,
-        obs_salience)
-    _log_local_obs = jnp.broadcast_to(
-        log_obs_to_x[None, :], (horizon + 1, n_states))
-    # Per-step goal modes (paper note P1):
-    # - True ("channel"): fold preference into the *channel refresh* locals
-    #   for t=1..T, obs-only fwd/bwd locals, terminal singleton kept.
-    #   Empirical hybrid — avoids the trap-path pathology of unary insertion
-    #   but has no rollout-semantics guarantee (P1.5).
-    # - "additive": rollout (expected-utility) semantics per P1. NO
-    #   preference in any graph potential (obs-only locals everywhere, flat
-    #   terminal singleton); preference enters only the r(u|x) refresh via
-    #   the additive Bellman sweep (P1.5a-b) computed below. Propagating
-    #   preference with geometric/BP messages instead computes exponential
-    #   utility and buys "fantasy" transitions at stochastic branch points
-    #   (P1.4/P1.6) — the sink-trap-from-START failure.
-    additive_goal = per_step_goal == "additive"
-    if per_step_goal and not additive_goal:
-        step_mask = (jnp.arange(horizon + 1) >= 1).astype(_log_local_obs.dtype)
-        _log_local_chan = (_log_local_obs
-                           + step_mask[:, None] * log_goal[None, :])
-    else:
-        _log_local_chan = _log_local_obs
-    log_goal_bwd = jnp.zeros_like(log_goal) if additive_goal else log_goal
-    # Beliefs / objective use the same local that enters the dyn blocks
-    _log_local_bel = (_log_local_chan
-                      if (per_step_goal and not additive_goal)
-                      else _log_local_obs)
+    # φ_t: the obs→x message at every node; the per-step preference on
+    # t ≥ 1 is seen by the refresh, and by the sweeps only if the scheme says so
+    log_unary = jnp.broadcast_to(log_obs_to_x, (horizon + 1, n_states))
+    log_unary_refresh = (log_unary.at[1:].add(log_goal) if per_step_goal
+                         else log_unary)
+    log_unary_sweep = log_unary_refresh if scheme.goal_in_sweeps else log_unary
 
-    if additive_goal:
-        # Additive value sweep (P1.5a-b): risk-neutral cost-to-go under the
-        # posterior-mean table B̂, soft-min over actions (the KL(r‖p(u))
-        # regularizer). Message-independent -> computed once per call.
-        # Zero-preference states get a large finite cost instead of +inf so
-        # the expectation stays well-conditioned in float32.
-        b_mean_k = (alpha_B / alpha_B.sum(axis=0, keepdims=True)
-                    ).transpose(1, 0, 2)                      # (x, x', u)
-        step_cost = jnp.where(log_goal > LOG_ZERO / 2, -log_goal, 1e3)
-        w_val = jnp.zeros(n_states)
-        q_vals = []
-        for _ in range(horizon):  # t = T .. 1
-            j_val = step_cost + w_val
-            q_t = jnp.einsum("xyu,y->xu", b_mean_k, j_val)
-            w_val = -logsumexp(log_action_prior[None, :] - q_t, axis=1)
-            q_vals.append(q_t)
-        neg_q_value = -jnp.stack(q_vals[::-1])                # (T, S, U)
-    else:
-        neg_q_value = jnp.zeros((horizon, n_states, n_actions))
-
-    # Per-state obs contractions for the objective (time-independent):
-    # Σ_{f,y} r(y|x)·log table and Σ_{f,y} r(y|x)·Δ_A
-    r_yx_p = jnp.where(log_r_yx > LOG_ZERO / 2, jnp.exp(log_r_yx), 0.0)
-    obs_energy_x = _xlogy(r_yx_p, log_lik_A).sum(axis=(0, 1))  # (S,)
-    obs_kl_x = (r_yx_p * delta_A).sum(axis=(0, 1))             # (S,)
-    obs_coef = jnp.asarray(obs_tilt_coef, dtype=log_lik_A.dtype)
-
-    # Per-t contrast Δ_B from fractional counts: kernel layout
-    # (x_old, x_new, u) -> dirichlet layout (x_new, x_old, u), axis=0,
-    # cond x_old; the u-columns of a state x aggregate (cross terms)
-    def delta_B_fn(nbar_B):
-        d = jax.vmap(
-            lambda nb: dirichlet_posterior_kl(
-                alpha_B, nb, axis=0, cond_axes=(1,))
-        )(nbar_B.transpose(0, 2, 1, 3))  # (T, x_new, x_old, u)
-        return jnp.where(valid_B_k[None], d.transpose(0, 2, 1, 3), 0.0)
-
-    q_u_init = jnp.zeros((horizon, n_actions))
-    log_fwd_prev_init = jnp.zeros((horizon + 1, n_states))
-    log_bwd_prev_init = jnp.zeros((horizon + 1, n_states))
-    # Conditional dyn channel r(x'|x,u): uniform over x'
-    log_r_xxu_init = jnp.full((horizon, n_states, n_states, n_actions),
-                              -jnp.log(n_states))
-    # θ-free planning channel r(u|x): always-on +H[q(u|x)] term
-    log_r_ux_init = jnp.full((horizon, n_states, n_actions), -jnp.log(n_actions))
-    # Fractional counts q_t(x',u|x), uniform over the valid (x',u) per x
-    nbar_B_init = jnp.broadcast_to(
-        _uniform_over_valid(valid_B_k, axes=(1, 2))[None],
-        (horizon, n_states, n_states, n_actions))
-    f_trace_init = jnp.zeros(n_iterations)
-
-    def body_fn(i, carry):
-        _, log_r_xxu, log_r_ux, nbar_B, log_fwd_prev, log_bwd_prev, f_trace = carry
-
-        # ḡ_dyn = B̃ · exp(Δ_B) · r(u|x) / r(x'|x,u) (Proposition 13⁗). The
-        # validity mask is CHANNEL-based, exactly as in
-        # active_inference_planning: a denominator channel entry that
-        # collapses toward zero (e.g. x' ≠ goal at the last step under a
-        # one-hot goal) is clipped out of the graph one-way instead of
-        # amplifying the kernel via −log r → +∞. Structural zeros are
-        # already LOG_ZERO inside log_lik_B_k.
-        delta_B = (delta_B_fn(nbar_B) if dyn_tilt_coef
-                   else jnp.zeros((horizon, n_states, n_states, n_actions),
-                                  log_lik_B_k.dtype))
-        dyn_valid = log_r_xxu > LOG_ZERO / 2
-        neg_r_xxu = jnp.where(dyn_valid, -log_r_xxu, 0.0)
-        base_dyn = (log_lik_B_k[None] + delta_B
-                    + log_r_ux[:, :, None, :] + neg_r_xxu)
-        base_dyn = jnp.where(dyn_valid, base_dyn, LOG_ZERO)
-
-        log_reduced_per_t = base_dyn.transpose(0, 2, 1, 3)  # (T, x_new, x_old, u)
-
-        # Obs-only locals in fwd/bwd: preference enters via channels (+ terminal)
-        log_fwd_msgs = forward_pass(
-            log_reduced_per_t, log_q0, log_action_prior, _log_local_obs, horizon,
-            log_prev_fwd=log_fwd_prev, msg_damping=damping
-        )
-        log_bwd_msgs, q_u = backward_pass(
-            log_reduced_per_t, log_fwd_msgs, log_goal_bwd, log_action_prior,
-            _log_local_obs, horizon,
-            log_prev_bwd=log_bwd_prev, msg_damping=damping
-        )
-
-        # Channel refresh (D.5.2⁗): every target is a conditional of the
-        # current block belief, so ONE contraction with the kernel table
-        # (no arithmetic-table variant — block-marginal preservation). All
-        # targets condition on x_old, so μ_{x_{t-1}→dyn} cancels exactly —
-        # it is OMITTED rather than cancelled numerically: a LOG_ZERO
-        # forward entry would shift the whole slice to ~LOG_ZERO magnitude
-        # where float32 spacing destroys the O(1) within-slice structure.
-        # Per-step preference (if any) lives in _log_local_chan here.
-        bwd_local = log_bwd_msgs[1:] + _log_local_chan[1:]
-        log_msgs = (bwd_local[:, None, :, None]
-                    + log_action_prior[None, None, None, :])
-        m = base_dyn + log_msgs
-
-        # r(x'|x,u) <- norm_{x'}[m]  (preference-free m in additive mode:
-        # the P1.2 hard constraint — preference must not tilt the state
-        # conditionals or the learning counts)
-        raw_r_xxu = m - logsumexp(m, axis=2, keepdims=True)
-        # r(u|x) <- norm_u[ lse_{x'} m (- Q_t in additive mode, P1.5b) ]
-        log_pair = logsumexp(m, axis=2) + neg_q_value  # (T, x_old, u)
-        raw_r_ux = log_pair - logsumexp(log_pair, axis=2, keepdims=True)
-        # n̄_B <- q_t(x',u|x), damped linearly in count space; structural
-        # zeros masked so the contrast never sees mass on them
-        b_joint = jnp.exp(m - logsumexp(m, axis=(2, 3), keepdims=True))
-        b_joint = jnp.where(valid_B_k[None], b_joint, 0.0)
-        new_nbar = (1.0 - damping) * nbar_B + damping * b_joint
-
-        new_r_xxu = (damp_log_channel(log_r_xxu, raw_r_xxu, damping, cond_axis=2)
-                     if dyn_channel else log_r_xxu)
-        new_r_ux = damp_log_channel(
-            log_r_ux, raw_r_ux, damping, cond_axis=2)
-
-        if track_objective:
-            f = evaluate_single_objective(
-                base_dyn, log_lik_B_k, delta_B, log_fwd_msgs, log_bwd_msgs,
-                _log_local_bel, log_action_prior, log_q0, log_goal,
-                obs_energy_x, obs_kl_x, obs_tilt_coef=obs_coef,
-                per_step_goal=per_step_goal)
-            f_trace = f_trace.at[i].set(f)
-
-        return (q_u, new_r_xxu, new_r_ux, new_nbar,
-                log_fwd_msgs, log_bwd_msgs, f_trace)
-
-    result = lax.fori_loop(
-        0, n_iterations, body_fn,
-        (q_u_init, log_r_xxu_init, log_r_ux_init, nbar_B_init,
-         log_fwd_prev_init, log_bwd_prev_init, f_trace_init)
-    )
-    q_u, log_r_xxu, log_r_ux, nbar_B, _, _, f_trace = result
-
-    if additive_goal:
-        # Root policy (P1.4 item 4): q(u_1) ∝ Σ_x q0(x) r_1(u|x). The
-        # backward-pass q_u is preference-free here, so it cannot rank
-        # actions by value.
-        log_root = logsumexp(log_q0[:, None] + log_r_ux[0], axis=0)
-        action_dist = jnp.exp(log_root - logsumexp(log_root))
-    else:
-        action_dist = q_u[0]
-        action_dist = action_dist / (action_dist.sum() + 1e-10)
-    if track_objective:
-        return action_dist, log_r_xxu, log_r_ux, nbar_B, f_trace
-    return action_dist, log_r_xxu, log_r_ux, nbar_B
-
-
-# =============================================================================
-# Public entry point: SP-EFE and its ablations
-# =============================================================================
-
-COUPLED_PLANNERS = ("coupled-nodyn", "coupled-mp", "coupled-nodelta")
-COUPLED_IGC_PLANNERS = ("coupled-nodyn-igc", "coupled-mp-igc",
-                        "coupled-nodelta-igc")
-
-
-def coupled_planner_kwargs(planner):
-    """Channel / Dirichlet-tilt flags for a ``coupled-*`` planner name.
-
-    ``coupled-*-igc`` keeps an optional ``obs_salience`` (IG_c / Δ_θ)
-    and drops Dirichlet novelty: ``obs_tilt_coef=0`` (no IG_A) and
-    ``dyn_tilt_coef=0`` (no IG_B). ``coupled-mp-igc`` and
-    ``coupled-nodelta-igc`` are therefore identical.
-    """
-    igc = planner.endswith("-igc")
-    base = planner[:-4] if igc else planner
-    if base not in COUPLED_PLANNERS:
-        raise ValueError(planner)
-    return dict(
-        dyn_channel=(base != "coupled-nodyn"),
-        dyn_tilt_coef=0 if (igc or base == "coupled-nodelta") else 1,
-        obs_tilt_coef=0 if igc else 2,
+    return PlanningProblem(
+        scheme=scheme, horizon=horizon, per_step_goal=per_step_goal,
+        damping=damping, alpha_B=alpha_B, log_m_B=log_m_B,
+        valid_B=is_live(log_m_B),
+        log_action_prior=safe_log(jnp.full(n_actions, 1.0 / n_actions)
+                                  if action_prior is None else action_prior),
+        log_q0=safe_log(q_current_state), log_goal=log_goal,
+        log_unary_sweep=log_unary_sweep, log_unary_refresh=log_unary_refresh,
+        obs_energy_x=weighted_log(q_yx, log_m_A).sum(axis=(0, 1)),
+        obs_info_x=(q_yx * delta_A).sum(axis=(0, 1)),
     )
 
 
-@partial(jax.jit, static_argnums=(4, 5), static_argnames=(
-    "track_objective", "per_step_goal", "dyn_channel", "dyn_tilt_coef",
-    "obs_tilt_coef"))
+def initial_state(problem: PlanningProblem) -> SweepState:
+    """Uniform channels (Bethe BP), admissible uniform n̄_B, zero messages."""
+    T, (S, _, U) = problem.horizon, problem.log_m_B.shape
+    return SweepState(
+        log_r_xxu=jnp.full((T, S, S, U), -jnp.log(S)),
+        log_r_ux=jnp.full((T, S, U), -jnp.log(U)),
+        nbar_B=jnp.broadcast_to(uniform_over_valid(problem.valid_B, axes=(0, 2)),
+                                (T, S, S, U)),
+        log_fwd=jnp.zeros((T + 1, S)),
+        log_bwd=jnp.zeros((T + 1, S)))
+
+
+@partial(jax.jit, static_argnames=(
+    "horizon", "n_iterations", "scheme", "per_step_goal", "track_objective"))
 def sp_efe_planning(
-    q_current_state,
-    alpha_A,
-    alpha_B,
-    goal,
-    horizon,
-    n_iterations,
-    damping=1.0,
-    action_prior=None,
-    track_objective=False,
-    per_step_goal=False,
-    obs_salience=None,
-    dyn_channel=True,     # bool (static): False ablates r(x'|x,u)
-    dyn_tilt_coef=1,      # int (static): 0 drops Δ_B
-    obs_tilt_coef=2,      # int (static): 0 drops Δ_A
-) -> tuple:
-    """Plan via the prior-faithful coupled objective (D.2b / Option 2).
+    q_current_state: Float[Array, "S"],
+    alpha_A: Float[Array, "F C S"],
+    alpha_B: Float[Array, "S S U"],
+    goal: Float[Array, "S"],
+    *,
+    horizon: int,
+    n_iterations: int,
+    scheme: Scheme = Scheme(),
+    damping: float = 1.0,
+    action_prior: Float[Array, "U"] | None = None,
+    obs_salience: Float[Array, "F C S"] | None = None,
+    per_step_goal: bool = False,
+    track_objective: bool = False,
+) -> PlanResult:
+    """Plan on the POMDP chain; every row of the paper's table is a ``Scheme``.
 
-    Arithmetic-mean likelihood tables + obs tilt 2·Δ_A + dyn tilt Δ_B.
-    Same return signature as `conjugate_aif_single_planning`.
+    Args:
+        q_current_state: current state belief.
+        alpha_A, alpha_B: Dirichlet counts of the observation and transition
+            models; the planner uses their posterior-mean tables.
+        goal: state preference p̂(x); the terminal factor, and with
+            ``per_step_goal`` also a unary factor on x_1..x_T.
+        horizon: T, the number of planned transitions (static).
+        n_iterations: sweeps; each is one forward/backward pass followed by a
+            channel refresh (static).
+        scheme: which corrections are kept; ``paper_scheme(label)`` for the
+            paper's rows (static).
+        damping: 1 = full update; 0.5 is used throughout the paper.
+        action_prior: p(u); uniform if None.
+        obs_salience: optional (F, C, S) log-space tilt on g_obs (IG_c / Δ_θ).
+        per_step_goal: preference on every future state as well as the
+            terminal one (static). See ``Scheme.goal_in_sweeps`` for how it
+            enters the chain.
+        track_objective: record ``objective_terms`` after every sweep (static;
+            roughly doubles the cost).
 
-    ``per_step_goal=True`` folds the preference into dyn-channel refresh for
-    every future state x_1..x_T (while keeping the terminal singleton). This
-    breaks wall-self-loop indifference at long horizons without the trap-path
-    pathology of injecting preference into forward/backward message locals.
-
-    ``per_step_goal="additive"`` is the principled rollout-semantics variant
-    (paper note P1): preference enters only the r(u|x) refresh through an
-    additive (risk-neutral) Bellman value sweep under the posterior-mean B̂,
-    while all graph potentials, beliefs, and learning counts stay
-    preference-free.
-
-    ``obs_salience``: optional (F, C, S) additive log-space obs tilt, e.g.
-    c·Δ_θ from ``discrete_theta_salience`` (paper note P2) — count-free
-    information gain about a discrete θ block shared by the obs factors.
-
-    ``dyn_channel=False`` drops the conditional dyn channel r(x'|x,u), i.e.
-    the −Σ H[q(x_t|x_{t-1},u_t)] state-info-gain correction (the notebook's
-    "Exploration" prior), keeping Δ_B, the obs channels and r(u|x). Under a
-    smeared/learned B̂ the channel makes the kernel support-uniform and wipes
-    out the exploitation signal; with identity A it also rewards stochastic
-    transitions ("noisy TV").
-
-    ``dyn_tilt_coef=0`` drops the Dirichlet Δ_B tilt (parameter IG). With
-    the dyn channel still on this is the MP analogue of analytic-efe-noamb-noig
-    (E[log B̂] without −IG_B); both off recovers a KL-control-like kernel
-    B̃·r(u|x).
-
-    ``obs_tilt_coef=0`` drops the Dirichlet Δ_A tilt (parameter IG_A).
-    Combined with ``dyn_tilt_coef=0`` this is the IG_c-only ablation
-    (``obs_salience`` / Δ_θ remains): T-maze ``coupled-*-igc``.
+    Example:
+        >>> result = sp_efe_planning(q0, alpha_A, alpha_B, goal, horizon=5,
+        ...                          n_iterations=50, damping=0.5,
+        ...                          scheme=paper_scheme("SP-EFE"))
+        >>> result.action_dist            # q(u_1)
+        >>> result.q_x                    # (T+1, S) planned state beliefs
+        >>> jnp.exp(result.state.log_r_ux)  # the policy channel r(u|x)
     """
-    _, log_lik_A = dirichlet_log_tables(alpha_A, axis=1)
-    _, log_lik_B = dirichlet_log_tables(alpha_B, axis=0)
-    return _planning_core(
-        q_current_state, alpha_A, log_lik_A, alpha_B, log_lik_B, goal,
-        horizon, n_iterations, damping, action_prior, track_objective,
-        obs_tilt_coef=obs_tilt_coef, per_step_goal=per_step_goal,
-        obs_salience=obs_salience, dyn_channel=dyn_channel,
-        dyn_tilt_coef=dyn_tilt_coef)
+    _check_inputs(q_current_state, alpha_A, alpha_B, goal, action_prior,
+                  horizon, scheme, per_step_goal)
+    problem = build_problem(
+        q_current_state, alpha_A, alpha_B, goal, horizon=horizon,
+        n_iterations=n_iterations, scheme=scheme, damping=damping,
+        action_prior=action_prior, obs_salience=obs_salience,
+        per_step_goal=per_step_goal)
+
+    state, (q_u, terms) = lax.scan(
+        lambda s, _: sweep(problem, s, track_objective),
+        initial_state(problem), None, length=n_iterations)
+
+    delta_B = information_gain_B(problem, state.nbar_B) if scheme.novelty_B else 0.0
+    log_g_dyn = dynamics_kernel(problem.log_m_B, delta_B, state.log_r_ux, state.log_r_xxu)
+    q_x = jnp.exp(log_normalize(state.log_fwd + state.log_bwd
+                                + problem.log_unary_refresh, axis=1))
+    trace = None if terms is None else {**terms, "total": sum(terms.values())}
+    return PlanResult(q_u[-1, 0], q_u[-1], q_x, log_g_dyn, state, trace)

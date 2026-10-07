@@ -15,7 +15,7 @@ of preference to resolve the model first.
 
 Everything the scheme is made of is visible here:
 
-  1. the Dirichlet tables  Ã, B̃      (spmp/tables.py)
+  1. the posterior means  m_A, m_B   (spmp/tables.py)
   2. the information gain  Δ_B       (spmp/info_gain.py)
   3. the channels r(u|x), r(x'|x,u)  refreshed to a fixed point (spmp/sp_efe.py)
   4. q(u_1), and how the ablations change it
@@ -32,7 +32,7 @@ from agent import CLAMP, FLAT, choose_action
 from spmp import (
     dirichlet_log_tables,
     dirichlet_posterior_kl,
-    sp_pref_planning,
+    paper_scheme,
     sp_efe_planning,
 )
 
@@ -107,10 +107,11 @@ def show_fixed_point(alpha_A, alpha_B, goal, q0):
     print("then refreshed from the region beliefs and damped. Watch q(u_1) settle:\n")
     print(f"  {'sweeps':>7}  {'q(LEFT)':>9} {'q(RIGHT)':>9}   r(u=RIGHT | x) per cell")
     for n in (1, 2, 3, 5, 10, 50):
-        ad, log_r_xxu, log_r_ux, _ = sp_efe_planning(
-            q0, alpha_A, alpha_B, goal, HORIZON, n, damping=0.5)
-        ad = np.asarray(ad)
-        r_ux = np.exp(np.asarray(log_r_ux))     # (T, S, U)
+        plan = sp_efe_planning(
+            q0, alpha_A, alpha_B, goal, horizon=HORIZON, n_iterations=n,
+            damping=0.5)
+        ad = np.asarray(plan.action_dist)
+        r_ux = np.exp(np.asarray(plan.state.log_r_ux))        # (T, S, U)
         print(f"  {n:>7}  {ad[LEFT]:>9.4f} {ad[RIGHT]:>9.4f}   "
               f"{np.round(r_ux[0, :, RIGHT], 3)}")
     print("\nr(u|x) is the policy channel: the planning correction Σ H[q(u|x)]")
@@ -124,24 +125,22 @@ def show_ablations(alpha_A, alpha_B, goal, q0):
     print("\n" + "=" * 72)
     print("4. The ablations are flags, not separate planners")
     print("=" * 72)
+    # Paper label -> display name; the Scheme comes from paper_scheme
     variants = [
-        ("SP-EFE",                  dict(dyn_channel=True,  dyn_tilt_coef=1, obs_tilt_coef=2)),
-        ("SP-EFE^-dyn",             dict(dyn_channel=False, dyn_tilt_coef=1, obs_tilt_coef=2)),
-        ("SP-EFE^-Db",              dict(dyn_channel=True,  dyn_tilt_coef=0, obs_tilt_coef=2)),
-        ("SP-EFE^-Da-Db",           dict(dyn_channel=True,  dyn_tilt_coef=0, obs_tilt_coef=0)),
-        ("SP-EFE^-Da-Db-dyn",       dict(dyn_channel=False, dyn_tilt_coef=0, obs_tilt_coef=0)),
+        ("SP-EFE",                  "SP-EFE"),
+        ("SP-EFE-dyn",              "SP-EFE^-dyn"),
+        ("SP-EFE-DeltaB",           "SP-EFE^-Db"),
+        ("SP-EFE-DeltaA-DeltaB",    "SP-EFE^-Da-Db"),
+        ("SP-EFE-DeltaA-DeltaB-dyn", "SP-EFE^-Da-Db-dyn"),
+        ("SP-Pref-Plan",            "SP-Pref-Plan"),
+        ("SP-Pref",                 "SP-Pref"),
     ]
     print(f"\n  {'planner':<22} {'q(LEFT)':>9} {'q(RIGHT)':>9}  action")
-    for name, flags in variants:
+    for planner, name in variants:
         ad = np.asarray(sp_efe_planning(
-            q0, alpha_A, alpha_B, goal, HORIZON, 50, damping=0.5, **flags)[0])
+            q0, alpha_A, alpha_B, goal, horizon=HORIZON, n_iterations=50,
+            damping=0.5, scheme=paper_scheme(planner)).action_dist)
         print(f"  {name:<22} {ad[LEFT]:>9.4f} {ad[RIGHT]:>9.4f}  "
-              f"{ACTION_NAME[choose_action(ad, N_ACTIONS)]}")
-    for label, corr in (("SP-Pref-Plan", True), ("SP-Pref", False)):
-        ad = np.asarray(sp_pref_planning(
-            q0, alpha_A, alpha_B, goal, HORIZON, 50, damping=0.5,
-            planning_correction=corr)[0])
-        print(f"  {label:<22} {ad[LEFT]:>9.4f} {ad[RIGHT]:>9.4f}  "
               f"{ACTION_NAME[choose_action(ad, N_ACTIONS)]}")
 
     print("\nRead this table carefully -- it reproduces the two effects the paper")
@@ -151,15 +150,15 @@ def show_ablations(alpha_A, alpha_B, goal, q0):
     print("  * Dropping BOTH novelty terms but keeping the dynamics channel still")
     print("    goes RIGHT. That is not novelty, it is entropy-following: the")
     print("    channel -H[q(x'|x,u)] rewards transitions that look uncertain, and a")
-    print("    flat column is maximally uncertain. This is the dagger footnote in")
+    print("    flat column is maximally uncertain. This is the footnote in")
     print("    the paper's Table 1, and why the frozen-B column is reported.")
     print("  * Only with the channel off as well does the novelty-free planner")
     print("    behave like a pure goal-seeker -- and then it agrees with")
     print("    SP-Pref-Plan to four decimals, which is the paper's claim that")
     print("    stripping every correction recovers the preference-only planner.")
     print("    SP-Pref, lacking the planning correction too, is the softer one.")
-    print("\ncoupled_planner_kwargs() maps each planner name onto these flags;")
-    print("see spmp/sp_efe.py. dispatch.py chooses between SP-EFE and SP-Pref.")
+    print("\npaper_scheme() maps each planner name onto a Scheme of kept")
+    print("corrections (PAPER_ROWS in spmp/sp_efe.py); SP-Pref keeps none.")
 
 
 def main():
@@ -178,8 +177,8 @@ def main():
     print(f"Agent acts: {ACTION_NAME[choose_action(ad, N_ACTIONS)]}  "
           f"(argmax of q(u_1); see agent.choose_action)")
     print("=" * 72)
-    print("\nNext: agent.py for the filter/learning loop every planner shares,")
-    print("then experiments/ for the two grid POMDPs of the paper.")
+    print("\nNext: agent.py for the filter and learning loop every planner shares,")
+    print("then run_fog_walls.py and run_unmapped_detour.py for the two experiments.")
 
 
 if __name__ == "__main__":

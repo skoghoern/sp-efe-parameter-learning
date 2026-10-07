@@ -13,11 +13,19 @@ hanging off every state:
 
 A sweep is one ``forward_pass`` followed by one ``backward_pass``; the backward
 pass also returns the action marginal q(u_t). Planners call these in a
-``lax.fori_loop``, damping their channels after each sweep -- see
-``sp_efe.py`` (SP-EFE) and ``sp_pref.py`` (SP-Pref).
+``lax.scan``, damping their channels after each sweep -- see ``sp_efe.py``.
 
 All internal computation is in log-space; probability-space tensors are accepted
 at the boundary.
+
+Structural-zero invariant
+    Any array named ``log_*`` may contain ``LOG_ZERO`` for structurally
+    impossible entries (zero prior count, forbidden transition). Such entries
+    must be masked with ``is_live`` before any arithmetic other than adding
+    finite terms -- in particular before subtraction (−log r in the dynamics
+    kernel) -- and must be excluded from every expectation
+    (``sp_efe.weighted_log``). In float32, LOG_ZERO + x == LOG_ZERO for any
+    live x, so a masked entry stays masked through the sums.
 """
 
 import jax
@@ -33,6 +41,16 @@ LOG_ZERO = -1e12
 def safe_log(x):
     """Log that maps 0 → LOG_ZERO instead of -inf."""
     return jnp.where(x > 0, jnp.log(jnp.maximum(x, 1e-30)), LOG_ZERO)
+
+
+def is_live(log_x):
+    """Mask of entries that are not structural zeros (the LOG_ZERO sentinel)."""
+    return log_x > LOG_ZERO / 2
+
+
+def log_normalize(log_x, axis):
+    """log_x − logsumexp(log_x) over ``axis``; a normalized log-conditional."""
+    return jax.nn.log_softmax(log_x, axis=axis)
 
 
 # =============================================================================
@@ -51,7 +69,7 @@ def damp_log_channel(log_old, log_new, damping, cond_axis):
     damped = (1.0 - damping) * log_old + damping * log_new
 
     # Structural zeros: only zero if BOTH old and new are LOG_ZERO
-    valid = (log_old > LOG_ZERO / 2) | (log_new > LOG_ZERO / 2)
+    valid = is_live(log_old) | is_live(log_new)
     damped = jnp.where(valid, damped, LOG_ZERO)
 
     # Renormalize conditional for numerical stability

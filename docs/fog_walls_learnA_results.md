@@ -1,4 +1,4 @@
-# Fog-walls: a learn-A environment where coupled beats pref-sp-plan
+# Fog-walls: a learn-A environment where SP-EFE beats SP-Pref-Plan
 
 Session of 2026-09-09/10. Companion notes:
 [fog maze (sinks)](stochastic_maze_fog_results.md),
@@ -9,12 +9,12 @@ Session of 2026-09-09/10. Companion notes:
 [row-code grid (negative result)](row_code_grid_results.md).
 
 Question: an environment in which the agent has to **explore and learn A**
-to do well, such that `coupled-*` (in particular `coupled-nodelta`) beats
-`pref-sp-plan`.
+to do well, such that `SP-EFE*` (in particular `SP-EFE-DeltaB`) beats
+`SP-Pref-Plan`.
 
 ## Why the previous learn-A environments could not show it
 
-1. `pref-sp-plan` is **A-blind in planning** (`μ_obs→x = Σ_y Â(y|x)` is
+1. `SP-Pref-Plan` is **A-blind in planning** (`μ_obs→x = Σ_y Â(y|x)` is
    constant). Wherever the goal is reachable open-loop from a known start
    with deterministic B, KL wins without touching A (trap learn-A: 60/60 from
    episode 1). Learning A can only matter where blind control fails.
@@ -46,8 +46,8 @@ Layout meta: `sink_states=()`, `wall_states=FOG_WALLS`
 ## Known A and B (30 seeds)
 
 Terminal-only preference 4, shrinking H, argmax, 100 iters, damping 0.5.
-One episode per seed (the drift is the only randomness). Coupled-nodyn / mp /
-nodelta are identical on-policy: B is clamped, so Δ_B is idle and the dyn
+One episode per seed (the drift is the only randomness). SP-EFE-dyn / SP-EFE /
+SP-EFE-DeltaB are identical on-policy: B is clamped, so Δ_B is idle and the dyn
 channel does not change the first action.
 
 ```
@@ -63,9 +63,9 @@ planner at H = 11 and H = 8).
 
 | planner | goal | top row | steps | first q(N E S W) |
 | --- | --- | --- | --- | --- |
-| coupled-nodyn / mp / nodelta | **30/30** | **30/30** | 10.0 | [0.76, 0.00, 0.04, 0.20] NORTH |
-| pref-sp | 22/30 | 0 | 8.1 | [0.23, **0.30**, 0.23, 0.24] EAST |
-| pref-sp-plan | 29/30 | 0 | 8.1 | [0.20, **0.43**, 0.20, 0.18] EAST |
+| SP-EFE-dyn / SP-EFE / SP-EFE-DeltaB | **30/30** | **30/30** | 10.0 | [0.76, 0.00, 0.04, 0.20] NORTH |
+| SP-Pref | 22/30 | 0 | 8.1 | [0.23, **0.30**, 0.23, 0.24] EAST |
+| SP-Pref-Plan | 29/30 | 0 | 8.1 | [0.20, **0.43**, 0.20, 0.18] EAST |
 
 Walls are not lethal, so with three spare steps KL can bump after a wrong
 landing and still often hit the goal. Coupled still takes the top row every
@@ -77,9 +77,9 @@ commits EAST more sharply.
 
 | planner | goal | top row | steps | first q(N E S W) |
 | --- | --- | --- | --- | --- |
-| coupled-nodyn / mp / nodelta | **30/30** | **30/30** | **8.0** | [1.00, 0.00, 0.00, 0.00] NORTH |
-| pref-sp | 17/30 | 0 | 6.8 | [0.22, **0.32**, 0.22, 0.24] EAST |
-| pref-sp-plan | 18/30 | 0 | 6.8 | [0.13, **0.73**, 0.13, 0.00] EAST |
+| SP-EFE-dyn / SP-EFE / SP-EFE-DeltaB | **30/30** | **30/30** | **8.0** | [1.00, 0.00, 0.00, 0.00] NORTH |
+| SP-Pref | 17/30 | 0 | 6.8 | [0.22, **0.32**, 0.22, 0.24] EAST |
+| SP-Pref-Plan | 18/30 | 0 | 6.8 | [0.13, **0.73**, 0.13, 0.00] EAST |
 
 This is the same split as [known-A fog](stochastic_maze_fog_results.md)
 (coupled 30/30 top row, KL EAST into the drift). Both KL planners take the
@@ -106,23 +106,23 @@ Means ± std across seeds 0–4; `last-20` is wins in episodes 81–100;
 
 | planner | goal | last-20 | top row | errA | 1–10 | 11–20 | 21–30 | 31–60 | 61–80 | 81–100 | per-seed |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| coupled-nodyn | 94.4±2.0 | **20.0/20** | 20.2±31.9 | **0.026** | 0.74 | 0.72 | 0.98 | 1.00 | 1.00 | 1.00 | 97,91,94,95,95 |
-| coupled-mp | **95.8±0.7** | **20.0/20** | 3.8±0.4 | **0.026** | 0.76 | 0.84 | 0.98 | 1.00 | 1.00 | 1.00 | 95,95,97,96,96 |
-| **coupled-nodelta** | 94.4±2.2 | **20.0/20** | 20.0±32.5 | **0.025** | 0.72 | 0.78 | 0.94 | 1.00 | 1.00 | 1.00 | 95,90,96,96,95 |
-| pref-sp-plan | 81.4±4.8 | 16.2±0.7/20 | 0 | 0.037 | 0.74 | 0.86 | 0.76 | 0.83 | 0.84 | 0.81 | 77,76,80,87,87 |
-| pref-sp | 47.4±3.1 | 9.6±1.0/20 | 0 | 0.049 | 0.36 | 0.48 | 0.36 | 0.51 | 0.52 | 0.48 | 50,44,46,52,45 |
+| SP-EFE-dyn | 94.4±2.0 | **20.0/20** | 20.2±31.9 | **0.026** | 0.74 | 0.72 | 0.98 | 1.00 | 1.00 | 1.00 | 97,91,94,95,95 |
+| SP-EFE | **95.8±0.7** | **20.0/20** | 3.8±0.4 | **0.026** | 0.76 | 0.84 | 0.98 | 1.00 | 1.00 | 1.00 | 95,95,97,96,96 |
+| **SP-EFE-DeltaB** | 94.4±2.2 | **20.0/20** | 20.0±32.5 | **0.025** | 0.72 | 0.78 | 0.94 | 1.00 | 1.00 | 1.00 | 95,90,96,96,95 |
+| SP-Pref-Plan | 81.4±4.8 | 16.2±0.7/20 | 0 | 0.037 | 0.74 | 0.86 | 0.76 | 0.83 | 0.84 | 0.81 | 77,76,80,87,87 |
+| SP-Pref | 47.4±3.1 | 9.6±1.0/20 | 0 | 0.049 | 0.36 | 0.48 | 0.36 | 0.51 | 0.52 | 0.48 | 50,44,46,52,45 |
 
 Every coupled variant is at 1.00 from episode ~31 onward on every seed
-(last-20 = 20/20 on all 15 runs). `coupled-mp ≈ nodelta` in return (B is
+(last-20 = 20/20 on all 15 runs). `SP-EFE ≈ SP-EFE-DeltaB` in return (B is
 clamped, so Δ_B is idle); they differ in *which* clean row they lock onto.
-Seed 0 of nodyn / nodelta takes the top row (~84/100); the other four seeds
-take the bottom row via `(2,0)`, hence the huge top-row std. Coupled-mp
+Seed 0 of SP-EFE-dyn / SP-EFE-DeltaB takes the top row (~84/100); the other four seeds
+take the bottom row via `(2,0)`, hence the huge top-row std. SP-EFE
 almost never uses the top row (3.8/100) but still hits 1.00. The dyn
 channel does not hurt here: the only stochastic transition is the drift
 cell the agent visits during the novelty phase, and the bumps are
 deterministic.
 
-`pref-sp-plan` plateaus at 0.81±0.04 in the last block and `pref-sp` at
+`SP-Pref-Plan` plateaus at 0.81±0.04 in the last block and `SP-Pref` at
 0.48±0.05. They never take the top row. **Learning A changes nothing for
 them**: the plan never consults A, and their table error stays 1.5–2×
 higher because they only see the middle route. The 3-seed run (77.7 /
@@ -148,27 +148,27 @@ Figure (mean ± 1 std across the 5 seeds; shaded):
 
 | planner | goal | last-40 | top row | errB | 1–10 | 21–30 | 61–80 | 101–140 | 181–200 | per-seed |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| coupled-nodyn | 0.4±0.5 | 0.2/40 | 29.2±3.4 | **0.052** | 0.00 | 0.00 | 0.00 | 0.01 | 0.01 | 1,0,0,1,0 |
-| coupled-mp | **0.0±0.0** | 0/40 | 15.2±2.1 | 0.054 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0×5 |
-| **coupled-nodelta** | 0.6±0.5 | 0.2/40 | 15.6±2.2 | **0.052** | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 1,0,0,1,1 |
-| pref-sp-plan | 0.0±0.0 | 0/40 | **196.2±1.8** | 0.070 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0×5 |
-| pref-sp | 95.8±79.2 | 24.0±19.6/40 | 14.8±13.9 | 0.063 | 0.00 | 0.20 | 0.60 | 0.60 | 0.60 | 148,0,182,0,149 |
+| SP-EFE-dyn | 0.4±0.5 | 0.2/40 | 29.2±3.4 | **0.052** | 0.00 | 0.00 | 0.00 | 0.01 | 0.01 | 1,0,0,1,0 |
+| SP-EFE | **0.0±0.0** | 0/40 | 15.2±2.1 | 0.054 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0×5 |
+| **SP-EFE-DeltaB** | 0.6±0.5 | 0.2/40 | 15.6±2.2 | **0.052** | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 1,0,0,1,1 |
+| SP-Pref-Plan | 0.0±0.0 | 0/40 | **196.2±1.8** | 0.070 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0×5 |
+| SP-Pref | 95.8±79.2 | 24.0±19.6/40 | 14.8±13.9 | 0.063 | 0.00 | 0.20 | 0.60 | 0.60 | 0.60 | 148,0,182,0,149 |
 
-This is the opposite of learn-A. Coupled's Δ_B (and, for mp, the dyn
+This is the opposite of learn-A. Coupled's Δ_B (and, for SP-EFE, the dyn
 channel) never satiates in 200 episodes — errB is still falling at 0.052
 vs a flat-prior floor of ~0.07 — so they keep exploring and almost never
 arrive (`stop_at_goal=False` also means a lucky visit to `(4,2)` does not
 end the episode). That matches the open-grid learn-B note: the dyn
-channel blocks exploitation, and even nodyn needs Δ_B to decay below the
+channel blocks exploitation, and even SP-EFE-dyn needs Δ_B to decay below the
 preference, which does not happen here in 200 eps.
 
-`pref-sp-plan` is a frozen NORTH / top-wall loop: 196/200 episodes stay
+`SP-Pref-Plan` is a frozen NORTH / top-wall loop: 196/200 episodes stay
 inside the top-row cell set, but it never turns SOUTH into the goal
 (`(4,4)→(4,3)→(4,2)`). Action-index optimism picks NORTH first; the
 planning correction then *commits* to that wall-hug. errB stays at 0.070
 (almost the prior): it is not collecting new columns.
 
-`pref-sp` (no correction) is seed-fragile optimism. Three seeds lock onto
+`SP-Pref` (no correction) is seed-fragile optimism. Three seeds lock onto
 a working policy from ~ep 20–60 and then score 1.00 for the rest of the
 run (148, 182, 149/200); two seeds freeze at 0/200. The 0.60 last-block
 mean is 3/5, not a 60 % success rate per episode. The huge std band on
@@ -192,7 +192,7 @@ the same optimism/commitment pathology as on an open grid
   The clean-row columns are learned from certain states and become sharp.
 - Once `H[Â(·|x)]` on the fog block is ≈ log 5 and ≈ 0 on the clean rows,
   the obs-channel ambiguity term re-routes the plan along a deterministic
-  row (top row on seed 0 of nodyn/nodelta, bottom row via `(2,0)` on the
+  row (top row on seed 0 of SP-EFE-dyn/SP-EFE-DeltaB, bottom row via `(2,0)` on the
   other seeds, hence the top-row std) and Δ_A has decayed enough not to
   pull it back. From then on 1.00 at exactly 8 steps.
 
@@ -204,7 +204,7 @@ the same optimism/commitment pathology as on an open grid
 - KL known vs learn-A at H = 8: same policy (EAST, never the top row);
   goal rate is the luck of the drift, not of A.
 - `--scenario learn-B`: coupled explores B and does not exploit (0–1
-  goals / 200); `pref-sp-plan` freezes on the top wall (0/200); `pref-sp`
+  goals / 200); `SP-Pref-Plan` freezes on the top wall (0/200); `SP-Pref`
   is a 3/5 optimism lottery. Not a coupled > corr result.
 - Sink version ([fog](stochastic_maze_fog_results.md)): same tables, lethal
   cells → coupled 2/60. The only change between the two results is that

@@ -27,12 +27,8 @@ with the same support:
 
 with α_0 = Σ_j α_j, β_0 = Σ_j β_j. Structural zeros (α = 0) are excluded from
 every sum and map to LOG_ZERO in Δ; fractional counts must respect them
-(n̄ = 0 wherever α = 0), which holds automatically when n̄ comes from block
-conditionals built on LOG_ZERO-masked kernels.
-
-The parent repo also runs a standalone contrast *planner* from this module,
-along with earlier sign-flipped contrast forms kept there for diagnosis. The
-paper uses neither, so only the Δ machinery remains.
+(n̄ = 0 wherever α = 0), which holds when n̄ comes from block conditionals
+built on LOG_ZERO-masked kernels.
 """
 
 import jax.numpy as jnp
@@ -137,12 +133,12 @@ def dirichlet_posterior_kl(alpha, nbar, axis, cond_axes):
     return jnp.where(ok, kl_entry - kl0 + kl0_total, LOG_ZERO)
 
 
-def _uniform_over_valid(valid, axes):
+def uniform_over_valid(valid, axes):
     """Uniform fractional counts over the valid entries of each conditioning slice.
 
-    Used to initialize n̄ so the cavity tilt never sees mass on structural
-    zeros (the gammaln column totals would otherwise be inconsistent with the
-    masked per-entry sums).
+    The admissible initial n̄ for ``dirichlet_posterior_kl``: no mass on
+    structural zeros, otherwise the gammaln column totals would be
+    inconsistent with the masked per-entry sums.
     """
     counts = jnp.sum(valid, axis=axes, keepdims=True)
     return jnp.where(valid, 1.0 / jnp.maximum(counts, 1), 0.0)

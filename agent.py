@@ -1,28 +1,20 @@
-"""The protocol shared by every planner: filtering, learning, action selection.
+"""Filtering, learning, and action selection shared by every planner.
 
-This is Algorithm 1 of the paper, and it is deliberately the *only* copy. The
-experiments compare objectives, so everything outside the objective has to be
-held fixed: each planner sees the same belief from the same exact filter under
-the same posterior-mean matrices, updates the same Dirichlet counts the same
-way, and picks its action from q(u_1) by the same rule. Keeping one
-implementation is what makes that claim checkable rather than a promise.
+This is Algorithm 1 of the paper. The experiments compare objectives, so
+everything outside the objective is shared: the same filter, the same
+posterior-mean matrices, the same Dirichlet update, and the same action
+choice from q(u_1).
 
-The per-step cycle, for step s of a T-step episode:
+Per step s of a T-step episode:
 
     1. filter_step      q(x_s) from the observation and the last action
-    2. update_counts_*  fold the transition / observation into the Dirichlet
-    3. horizon_at       H_s = min(H, T - s + 1), the shrinking plan depth
-    4. <planner>        q(u_1) over the remaining horizon
+    2. update_counts_*  fold that transition or observation into the Dirichlet
+    3. horizon_at       H_s = min(H, T - s + 1)
+    4. planner          q(u_1) over the remaining horizon
     5. choose_action    argmax of q(u_1)
 
-Counts persist across episodes; pose and belief reset. Planning never touches
-the counts -- q(θ) is frozen for the duration of a plan -- so learning is the
-plain conjugate increment below and nothing in ``spmp/`` needs to know about
-it.
-
-What is *not* here is the episode bookkeeping: what counts as an outcome, which
-cells are absorbing, and which metrics get recorded are environment-specific,
-and the two experiments legitimately differ. See ``experiments/``.
+Counts persist across episodes; pose and belief reset. A plan does not
+update the counts. Outcomes and metrics live in the experiment drivers.
 """
 
 from __future__ import annotations

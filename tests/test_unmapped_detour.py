@@ -202,7 +202,7 @@ class TestUnmappedDetourEnv:
 class TestUnmappedDetourRunner:
     def test_known_detour_for_coupled_and_corr(self):
         from run_unmapped_detour import run_episodes
-        for planner in ("coupled-nodyn", "pref-sp-plan"):
+        for planner in ("SP-EFE-dyn", "SP-Pref-Plan"):
             r = run_episodes(planner, scenario="known", n_episodes=1,
                              n_iterations=20)
             rec = r["results"][0]
@@ -211,7 +211,7 @@ class TestUnmappedDetourRunner:
 
     def test_frozen_corr_gambles(self):
         from run_unmapped_detour import run_episodes
-        r = run_episodes("pref-sp-plan", scenario="frozen", n_episodes=2,
+        r = run_episodes("SP-Pref-Plan", scenario="frozen", n_episodes=2,
                          n_iterations=20)
         assert all(rec["via_gate"] for rec in r["results"])
         assert r["n_unmapped_cols"] == 0
@@ -220,7 +220,7 @@ class TestUnmappedDetourRunner:
         from environments.unmapped_detour import UnmappedDetourGrid
         from run_unmapped_detour import run_episodes
         grid = UnmappedDetourGrid(unmapped_mode="doors")
-        r = run_episodes("coupled-nodyn", grid=grid, scenario="known",
+        r = run_episodes("SP-EFE-dyn", grid=grid, scenario="known",
                          n_episodes=1, n_iterations=20)
         rec = r["results"][0]
         assert rec["outcome"] == "GOAL" and rec["via_detour"]
@@ -228,7 +228,7 @@ class TestUnmappedDetourRunner:
 
     def test_learn_b_updates_unmapped_counts_only(self):
         from run_unmapped_detour import run_episodes
-        r = run_episodes("random", scenario="learn-B", n_episodes=3,
+        r = run_episodes("Random", scenario="learn-B", n_episodes=3,
                          n_iterations=5, seed=0)
         assert r["n_unmapped_cols"] >= 1
         assert r["results"][-1]["err"] < r["results"][0]["err"] + 1e-9

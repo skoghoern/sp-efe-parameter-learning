@@ -38,8 +38,7 @@ Then follow the code in this order:
 | `spmp/sweeps.py`                             | the factor graph, one sum-product sweep, channel damping      |
 | `spmp/tables.py`                             | how $\theta$ enters the graph: two expected-log tables        |
 | `spmp/info_gain.py`                          | $\Delta_A,\Delta_B$ — the per-entry $e^{\Delta}\ge1$ weights  |
-| `spmp/sp_efe.py`                             | **SP-EFE**: the two kernels, the fixed point, the entry point |
-| `spmp/sp_pref.py`                            | SP-Pref / SP-Pref-Plan: the same skeleton without the tilts   |
+| `spmp/sp_efe.py`                             | **SP-EFE**: the two kernels, the fixed point, the entry point; SP-Pref / SP-Pref-Plan are its all-flags-off rows |
 | `agent.py`                                   | the filter, count update and action rule every planner shares |
 | `run_fog_walls.py`, `run_unmapped_detour.py` | the two experiments                                           |
 
@@ -52,33 +51,29 @@ $$\log g_{\text{dyn}}(x',x,u) = \log \tilde B + \Delta_B + \log r(u\mid x) - \lo
 Each channel $r$ is substituted at its closed-form optimum — the corresponding
 conditional of $q$ — so a sweep is plain sum-product and the channels are
 refreshed from the beliefs it produces. Uniform channels recover standard Bethe
-BP. Only two planners are callable, `sp_efe_planning` and `sp_pref_planning`;
-every row of the paper's table is one of those two under different flags.
+BP. One planner is callable, `sp_efe_planning`; every row of the paper's
+table is that function under a `Scheme` of kept corrections
+(`paper_scheme(label)`, listed in `PAPER_ROWS`). The two kernels are
+`observation_kernel` and `dynamics_kernel`, the refresh is `refresh_channels`,
+and `objective_terms` is the objective written out term by term.
 
 ## Planner names
 
-The paper's labels map onto the `--planner` / `--planners` values as follows.
+`--planner` / `--planners`, the saved `.npz` keys, and `paper_figure.py` use the paper's labels. A superscript in the paper is a hyphenated suffix here: `SP-EFE-dyn` is SP-EFE with a −dyn superscript.
 
 
-| Paper                                      | Code                | Terms kept                                              |
-| ------------------------------------------ | ------------------- | ------------------------------------------------------- |
-| SP-EFE                                     | `coupled-mp`        | full scheme: obs + dyn channels, $\Delta_A$, $\Delta_B$ |
-| SP-EFE$^{-\mathrm{dyn}}$                   | `coupled-nodyn`     | no dynamics channel                                     |
-| SP-EFE$^{-\Delta_B}$                       | `coupled-nodelta`   | dynamics channel on, $\Delta_B$ off                     |
-| SP-EFE$^{-\Delta_A-\Delta_B}$              | `coupled-mp-igc`    | channels only (ambiguity, no novelty)                   |
-| SP-EFE$^{-\Delta_A-\Delta_B-\mathrm{dyn}}$ | `coupled-nodyn-igc` | as above, channel dropped too                           |
-| SP-Pref-Plan                               | `pref-sp-plan`      | planning correction $r_t(u_t\mid x_{t-1})$ only         |
-| SP-Pref                                    | `pref-sp`           | no corrections                                          |
-| EFE                                        | `analytic-efe`      | enumerates all $4^H$ policies under the exact EFE       |
-| Random                                     | `random`            | uniform actions, learning still on                      |
-
-
-`analytic-efe-noamb-noig` is the enumerated EFE with ambiguity and both novelty
-terms zeroed.
-
-The `coupled-*` code names are kept because the saved `.npz` arrays and the
-figure script are keyed on them; `PAPER_NAME` in `paper_figure.py` is the
-authoritative mapping.
+| Label                        | Terms kept                                              |
+| ---------------------------- | ------------------------------------------------------- |
+| `SP-EFE`                     | full scheme: obs + dyn channels, $\Delta_A$, $\Delta_B$ |
+| `SP-EFE-dyn`                 | no dynamics channel                                     |
+| `SP-EFE-DeltaB`              | dynamics channel on, $\Delta_B$ off                     |
+| `SP-EFE-DeltaA-DeltaB`       | channels only (ambiguity, no novelty)                   |
+| `SP-EFE-DeltaA-DeltaB-dyn`   | as above, channel dropped too                           |
+| `SP-Pref-Plan`               | planning correction $r_t(u_t\mid x_{t-1})$ only         |
+| `SP-Pref`                    | no corrections                                          |
+| `EFE`                        | enumerates all $4^H$ policies under the exact EFE       |
+| `EFE-noamb-noig`             | enumerated EFE with ambiguity and both novelty terms zeroed |
+| `Random`                     | uniform actions, learning still on                      |
 
 ## Reproducing the paper
 
@@ -96,7 +91,7 @@ Ablation rows (lower block of Table 1):
 ```bash
 uv run python run_fog_walls.py --compare --scenario learn-A \
     --maze fog-walls --horizon 8 --episodes 100 --n-seeds 5 \
-    --compare-planners coupled-mp-igc coupled-nodyn-igc
+    --compare-planners SP-EFE-DeltaA-DeltaB SP-EFE-DeltaA-DeltaB-dyn
 ```
 
 Known-$A$/$B$ control of Appendix C.2 (30 seeds, 30/30 vs 18/30):
@@ -121,7 +116,7 @@ The `known` and `frozen` columns of Table 1, and the enumerated EFE:
 uv run python run_unmapped_detour.py --unmapped doors --scenario known  --episodes 300
 uv run python run_unmapped_detour.py --unmapped doors --scenario frozen --episodes 300
 uv run python run_unmapped_detour.py --unmapped doors --scenario learn-B --episodes 100 \
-    --planners analytic-efe
+    --planners EFE
 ```
 
 Robustness checks of Appendix C.2 (permuted actions, mirrored layout, cells variant):
@@ -159,8 +154,7 @@ spmp/            sum-product message passing (the paper's SP-MP)
   sweeps.py      safe_log, the forward/backward passes, channel damping
   tables.py      Dirichlet expected-log tables (geometric + arithmetic)
   info_gain.py   Δ contrasts: the per-entry e^Δ ≥ 1 information-gain weights
-  sp_efe.py      SP-EFE: kernels, channel fixed point, entry point, ablation flags
-  sp_pref.py     SP-Pref and SP-Pref-Plan
+  sp_efe.py      kernels, channel fixed point, entry point, flags for every planner row
 agent.py         the one shared protocol: filter, count update, action rule
 dispatch.py      planner name -> planner, plus the enumerated EFE
 environments/
@@ -170,7 +164,7 @@ run_fog_walls.py        learn-θ_A experiment (learn-A / learn-B / known)
 run_unmapped_detour.py  learn-θ_B experiment (learn-B / known / frozen)
 paper_figure.py         redraws the paper figure from figures/*.npz
 viz.py                  single-episode belief overlays and GIFs (not used by the paper)
-tests/           47 tests over tensors, planners, the demo and the episode loops
+tests/           51 tests over tensors, planners, the demo and the episode loops
 docs/            per-experiment result write-ups
 ```
 

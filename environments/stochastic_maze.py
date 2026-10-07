@@ -19,13 +19,13 @@ There is a short path to the goal, but it crosses the stochastic drift and
 noisy-observation cells; a longer path along the top row is fully
 deterministic and noise-free.
 
-The default drift layout is chosen so that a risk-neutral soft-Bellman
-planner (pref-sp ``additive``) is lured into the short row — under a
-preference of 4 the soft-min action-entropy bonus (log 4 per step) makes
-the absorbing sinks look cheap — and ends in a sink ~70-80% of the time,
-whereas the ambiguity-aware coupled-mp planner takes the safe top-row
-detour. The notebook's original uniform drift (0.7 over up/down) is
-available via ``build_B(drift_spec=NOTEBOOK_DRIFT_SPEC)``.
+The default drift layout is chosen so that the preference-driven planners
+(SP-Pref / SP-Pref-Plan) are lured into the short row — their route is
+A-independent, so the conveyor's pull toward the goal is all they see — and
+never take the top row, whereas the ambiguity-aware SP-EFE planner takes
+the safe top-row detour on every seed. The notebook's original uniform drift
+(0.7 over up/down) is available via
+``build_B(drift_spec=NOTEBOOK_DRIFT_SPEC)``.
 
 Coordinates: the notebook uses Julia ``CartesianIndex(row, col)`` with
 row 1 at the top and column-major linear indices. Here we use the repo
@@ -84,7 +84,7 @@ DRIFT_SPEC = {
     (2, 2): (0.5, (EAST,)),
     (3, 2): (0.7, (NORTH, SOUTH)),    # trap: both neighbours are sinks
 }
-# The notebook's uniform drift (0.7 over up/down) for reference/tests.
+# Original uniform drift (0.7 over up/down), kept so tests can compare layouts.
 NOTEBOOK_DRIFT_SPEC = {c: (0.7, (NORTH, SOUTH)) for c in STOCHASTIC_STATES}
 
 
@@ -121,7 +121,7 @@ TOP_ROW_CELLS = (
 
 
 def _move(x, y, action, grid_x=None, grid_y=None):
-    """Deterministic move destination; walls = stay (notebook ``move``)."""
+    """Deterministic move destination; walls stay put."""
     gx = GRID_X if grid_x is None else int(grid_x)
     gy = GRID_Y if grid_y is None else int(grid_y)
     dx, dy = ACTION_DXY[action]
@@ -135,8 +135,7 @@ def build_B(sink_states=SINK_STATES, drift_spec=DRIFT_SPEC,
             grid_x=None, grid_y=None, wall_states=()):
     """Transition tensor B[next, current, action], (S, S, 4).
 
-    Port of the notebook's ``movement_tensor`` with a per-cell drift spec:
-    sinks self-loop; a drift cell ``(x, y): (p, dirs)`` mixes
+    Sinks self-loop. A drift cell ``(x, y): (p, dirs)`` mixes
     ``(1-p) * move(intended)`` with ``p/len(dirs) * Σ_d move(d)``; other
     cells move deterministically, grid edges = stay. ``wall_states`` are
     impassable interior cells: any move into one is a bump (stay), so they
@@ -175,7 +174,7 @@ def build_B(sink_states=SINK_STATES, drift_spec=DRIFT_SPEC,
 
 
 def _neighbors(x, y, grid_x=None, grid_y=None):
-    """All in-bounds neighbours including diagonals (notebook ``adjacent``)."""
+    """In-bounds neighbours, including diagonals."""
     gx = GRID_X if grid_x is None else int(grid_x)
     gy = GRID_Y if grid_y is None else int(grid_y)
     out = []
@@ -308,7 +307,7 @@ def maze_tensors(name="fog-walls"):
 
 
 class StochasticMazeEnv:
-    """Stochastic maze faithful to the notebook's ``world_step`` semantics."""
+    """One episode of the stochastic maze."""
 
     def __init__(self, rng=None, start_state=None,
                  goal_state=None, maze="fog-walls", A=None, B=None):
@@ -343,7 +342,7 @@ class StochasticMazeEnv:
         return int(self.rng.choice(n_obs, p=p / p.sum()))
 
     def reward(self):
-        """+1 at the goal, 0 elsewhere (the notebook has no reward cells)."""
+        """1 at the goal, 0 elsewhere."""
         return 1.0 if self.state == self.goal_state else 0.0
 
     def step(self, action):
@@ -354,13 +353,13 @@ class StochasticMazeEnv:
 
 
 # ---------------------------------------------------------------------------
-# Visualization (port of the notebook's ``depict`` + trajectory animation)
+# Visualization
 # ---------------------------------------------------------------------------
 def depict(player=None, ax=None, drift_spec=DRIFT_SPEC,
            sink_states=SINK_STATES, noisy_observations=NOISY_OBSERVATIONS,
            fog_cells=(), grid_x=None, grid_y=None, goal_xy=None,
            wall_states=()):
-    """Draw the maze in the notebook's style; returns the axes."""
+    """Draw the maze and return the axes."""
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
 
@@ -392,7 +391,7 @@ def depict(player=None, ax=None, drift_spec=DRIFT_SPEC,
             if (x, y) in drift_spec:
                 p, dirs = drift_spec[(x, y)]
                 horizontal = all(d in (EAST, WEST) for d in dirs)
-                for k in (1, 3, 5):  # notebook's three bands at k/7
+                for k in (1, 3, 5):  # three hatch bands
                     rect = ((x + k / 7, y, 1 / 7, 1) if horizontal
                             else (x, y + k / 7, 1, 1 / 7))
                     ax.add_patch(patches.Rectangle(
@@ -415,7 +414,7 @@ def depict(player=None, ax=None, drift_spec=DRIFT_SPEC,
 
 
 def animate_trajectory(states, path="simulation.gif", fps=4):
-    """Save a GIF of a state-index trajectory (notebook's animation cell)."""
+    """Save a GIF of a state-index trajectory."""
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
 

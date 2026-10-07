@@ -8,15 +8,10 @@ two precomputed log-tables per parameter block:
 - Arithmetic (mean) table:   log α̂ = log(α / Σ α),
   replacing every arithmetic θ-marginalization in the channel refresh.
 
-The per-entry Jensen gap (log_mean − log_geo ≥ 0, large at low counts) is the
-parameter-information-gain drive of the scheme. SP-EFE uses the arithmetic
-family; see ``conjugate_aif_coupled``.
+The per-entry Jensen gap log_mean − log_geo ≥ 0, large at low counts, is the
+parameter information gain. SP-EFE uses the arithmetic table.
 
-All computation is in log-space with LOG_ZERO guards for structural zeros.
-
-The parent repo pairs these tables with a structured-VMP planner that keeps a
-joint dyn channel r(x',u|x) and θ-conditioned block channels. The paper's
-scheme does not use it, so only the tables remain here.
+All computation is in log-space, with LOG_ZERO for structural zeros.
 """
 
 import jax.numpy as jnp

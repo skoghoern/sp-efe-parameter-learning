@@ -1,24 +1,12 @@
 """Planner dispatch shared by the two experiments, plus the enumerated EFE.
 
-Extracted verbatim from ``run_deep_sea_coupled.py`` in the parent repo
-(UAI-MP-AIF-JAX), which is where both experiment drivers used to import
-``_plan`` from. Nothing here is DeepSea-specific: the analytic planners
-enumerate policies on whatever ``(alpha_A, alpha_B, goal)`` they are given.
+The analytic planners enumerate policies on whatever ``(alpha_A, alpha_B,
+goal)`` they are given.
 
-Paper names (see ``PAPER_NAME`` in ``src/make_experiment_figures.py``):
-
-==========================  ====================================
-code name                   paper label
-==========================  ====================================
-``coupled-mp``              SP-EFE
-``coupled-nodyn``           SP-EFE^-dyn
-``coupled-nodelta``         SP-EFE^-Delta_B
-``coupled-mp-igc``          SP-EFE^-Delta_A-Delta_B
-``coupled-nodyn-igc``       SP-EFE^-Delta_A-Delta_B-dyn
-``pref-sp-plan``            SP-Pref-Plan
-``pref-sp``                 SP-Pref
-``analytic-efe``            EFE (enumerated)
-==========================  ====================================
+Planner ids are the paper's labels (``SP-EFE``, ``SP-EFE-dyn``,
+``SP-Pref``, ...). The same strings are the ``--planner`` values and the
+``.npz`` keys. ``PRETTY`` is that label typeset for matplotlib; superscripts
+such as SP-EFE^{-dyn} are display only.
 """
 
 from __future__ import annotations
@@ -30,45 +18,43 @@ import jax.numpy as jnp
 from jax.scipy.special import digamma as jax_digamma
 
 from spmp.sp_efe import (
-    COUPLED_IGC_PLANNERS, COUPLED_PLANNERS, sp_efe_planning,
-    coupled_planner_kwargs,
+    SP_EFE_IGC_PLANNERS, SP_EFE_PLANNERS, SP_PREF_PLANNERS, paper_scheme,
+    sp_efe_planning,
 )
-from spmp.sp_pref import sp_pref_planning
 
 EPS = 1e-12
 DEFAULT_ITERS = 100
 DEFAULT_DAMPING = 0.5
 IDENTIFIED_MASS = 0.8
-PLANNERS = ("coupled-nodyn", "coupled-mp", "coupled-nodelta",
-            "pref-sp", "pref-sp-plan")
-ANALYTIC_PLANNERS = ("analytic-efe", "analytic-efe-noamb-noig")
+PLANNERS = SP_EFE_PLANNERS + SP_PREF_PLANNERS
+ANALYTIC_PLANNERS = ("EFE", "EFE-noamb-noig")
 ALL_PLANNERS = PLANNERS + ANALYTIC_PLANNERS
-PLANNER_CHOICES = ALL_PLANNERS + COUPLED_IGC_PLANNERS
+PLANNER_CHOICES = ALL_PLANNERS + SP_EFE_IGC_PLANNERS
 
-# Plot labels / styles, previously imported from ``run_grid3x3_learn_B``.
+# Matplotlib mathtext for the same ids. Plain ids stay the npz / CLI keys.
 PRETTY = {
-    "coupled-nodyn": "coupled-nodyn",
-    "coupled-mp": "coupled-mp",
-    "coupled-nodelta": "coupled-nodelta",
-    "coupled-nodyn-igc": "coupled-nodyn-igc",
-    "coupled-mp-igc": "coupled-mp-igc",
-    "coupled-nodelta-igc": "coupled-nodelta-igc",
-    "pref-sp": "pref-sp",
-    "pref-sp-plan": "pref-sp-plan",
-    "analytic-efe": "analytic-efe",
-    "analytic-efe-noamb-noig": "analytic-efe-noamb-noig",
+    "SP-EFE": "SP-EFE",
+    "SP-EFE-dyn": r"SP-EFE$^{-\mathrm{dyn}}$",
+    "SP-EFE-DeltaB": r"SP-EFE$^{-\Delta_B}$",
+    "SP-EFE-DeltaA-DeltaB": r"SP-EFE$^{-\Delta_A-\Delta_B}$",
+    "SP-EFE-DeltaA-DeltaB-dyn": r"SP-EFE$^{-\Delta_A-\Delta_B-\mathrm{dyn}}$",
+    "SP-Pref": "SP-Pref",
+    "SP-Pref-Plan": "SP-Pref-Plan",
+    "EFE": "EFE",
+    "EFE-noamb-noig": "EFE-noamb-noig",
+    "Random": "Random",
 }
 STYLE = {
-    "coupled-nodyn": dict(color="#1f77b4", ls="-", marker="o"),
-    "coupled-mp": dict(color="#ff7f0e", ls="-", marker="*"),
-    "coupled-nodelta": dict(color="#9467bd", ls="-", marker="P"),
-    "coupled-nodyn-igc": dict(color="#1f77b4", ls=":", marker="o"),
-    "coupled-mp-igc": dict(color="#ff7f0e", ls=":", marker="*"),
-    "coupled-nodelta-igc": dict(color="#9467bd", ls=":", marker="P"),
-    "pref-sp": dict(color="#2ca02c", ls="-.", marker="s"),
-    "pref-sp-plan": dict(color="#006400", ls="-.", marker="D"),
-    "analytic-efe": dict(color="#d62728", ls="--", marker="^"),
-    "analytic-efe-noamb-noig": dict(color="#8c564b", ls="--", marker="v"),
+    "SP-EFE-dyn": dict(color="#1f77b4", ls="-", marker="o"),
+    "SP-EFE": dict(color="#ff7f0e", ls="-", marker="*"),
+    "SP-EFE-DeltaB": dict(color="#9467bd", ls="-", marker="P"),
+    "SP-EFE-DeltaA-DeltaB-dyn": dict(color="#1f77b4", ls=":", marker="o"),
+    "SP-EFE-DeltaA-DeltaB": dict(color="#ff7f0e", ls=":", marker="*"),
+    "SP-Pref": dict(color="#2ca02c", ls="-.", marker="s"),
+    "SP-Pref-Plan": dict(color="#006400", ls="-.", marker="D"),
+    "EFE": dict(color="#d62728", ls="--", marker="^"),
+    "EFE-noamb-noig": dict(color="#8c564b", ls="--", marker="v"),
+    "Random": dict(color="0.5", ls=":", marker=""),
 }
 
 
@@ -92,9 +78,9 @@ def analytic_efe_action_posterior(alpha_A, alpha_B, q0, goal, horizon,
     """Enumerated state-space EFE; first-action marginal of q(π)∝exp(−G).
 
     θ-free dynamics numerator (``B̂`` point estimate). When ``include_ig``
-    is True, keep ambiguity and −IG_A / −IG_B (``analytic-efe``). When
+    is True, keep ambiguity and −IG_A / −IG_B (``EFE``). When
     False, those three terms are zeroed, leaving E[log B̂] = −H[q(x'|x,u)]
-    plus terminal CE (``analytic-efe-noamb-noig``). Preference is
+    plus terminal CE (``EFE-noamb-noig``). Preference is
     **terminal-only**: −E[log p̂(x_H)] on the remaining horizon, matching
     ``per_step_goal=False`` in the MP planners. Counts are frozen over the
     rollout (standard EFE).
@@ -161,15 +147,8 @@ def _plan(planner, q, alpha_A, alpha_B, goal, h, n_iterations, damping,
     if planner in ANALYTIC_PLANNERS:
         return analytic_efe_action_posterior(
             alpha_A, alpha_B, q, goal, h,
-            include_ig=(planner == "analytic-efe"))
-    if planner in COUPLED_PLANNERS + COUPLED_IGC_PLANNERS:
-        ad, *_ = sp_efe_planning(
-            q, alpha_A, alpha_B, goal, h, n_iterations,
-            damping=damping, per_step_goal=per_step_goal,
-            **coupled_planner_kwargs(planner))
-    else:
-        ad, *_ = sp_pref_planning(
-            q, alpha_A, alpha_B, goal, h, n_iterations,
-            damping=damping, per_step_goal=per_step_goal,
-            planning_correction=(planner == "pref-sp-plan"))
-    return ad
+            include_ig=(planner == "EFE"))
+    return sp_efe_planning(
+        q, alpha_A, alpha_B, goal, horizon=h, n_iterations=n_iterations,
+        damping=damping, per_step_goal=per_step_goal,
+        scheme=paper_scheme(planner)).action_dist

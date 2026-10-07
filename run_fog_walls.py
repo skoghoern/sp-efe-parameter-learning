@@ -44,7 +44,7 @@ from environments.stochastic_maze import (
     StochasticMazeEnv, build_D, build_goal, maze_tensors,
     state_to_xy, xy_to_state,
 )
-from spmp.sp_efe import COUPLED_IGC_PLANNERS
+from spmp.sp_efe import SP_EFE_IGC_PLANNERS
 from agent import (
     FLAT, choose_action, clamped_alpha, filter_step, flat_alpha,
     horizon_at, matrix_error, posterior_mean_A, posterior_mean_B,
@@ -53,14 +53,10 @@ from agent import (
 from dispatch import ALL_PLANNERS as BASE_PLANNERS, _plan
 from viz import save_gif
 
-# FLAT (0.1) is the sweet spot for the graph preference modes under the
-# shrinking horizon (learn-A terminal-only: 100% goal / 100% safe route from
-# ~ep 40). NB: with --per-step-goal additive this parks from ~ep 30 (learned
-# columns stay entropic; residual ambiguity beats the additive goal once Δ_A is
-# spent) — use 0.01 there.
+# agent.FLAT (0.1) is the Dirichlet prior count for the reported learn-A runs.
 DEFAULT_ITERS = 100
 DEFAULT_DAMPING = 0.5
-DEFAULT_HORIZON = 11         # 5x5 notebook; mini layouts use meta["horizon"]=4
+DEFAULT_HORIZON = 11         # 5×5 layouts; mini layouts set meta["horizon"]=4
 DEFAULT_SHRINKING_HORIZON = True
 DEFAULT_STEPS = 25           # capped at horizon under shrinking H
 DEFAULT_EPISODES = {"known": 3, "learn-A": 60, "learn-B": 20}
@@ -69,14 +65,14 @@ COMPARE_KNOWN_SEEDS = 10
 COMPARE_LEARN_B_EPISODES = 20
 COMPARE_LEARN_A_SEEDS = 3
 LEARN_A_BLOCKS = ((1, 10), (11, 20), (21, 30), (31, 60))
-MP_PLANNERS = ("coupled-nodyn", "coupled-mp", "coupled-nodelta",
-               "pref-sp", "pref-sp-plan")
-# Ablations: ``coupled-*-igc`` drop the Dirichlet tilts Δ_A / Δ_B (channels
-# and ambiguity only); ``random`` is the uniform-action floor (learning on).
-RANDOM = "random"
-ABLATION_PLANNERS = COUPLED_IGC_PLANNERS + (RANDOM,)
-ANALYTIC_PLANNERS = ("analytic-efe", "analytic-efe-noamb-noig", "analytic-obs-efe",
-                     "sophisticated-efe")
+MP_PLANNERS = ("SP-EFE-dyn", "SP-EFE", "SP-EFE-DeltaB",
+               "SP-Pref", "SP-Pref-Plan")
+# Ablations: the ``-DeltaA-DeltaB`` labels drop the Dirichlet tilts Δ_A / Δ_B
+# (channels and ambiguity only); ``Random`` is the uniform-action floor
+# (learning on).
+RANDOM = "Random"
+ABLATION_PLANNERS = SP_EFE_IGC_PLANNERS + (RANDOM,)
+ANALYTIC_PLANNERS = ("EFE", "EFE-noamb-noig")
 PLANNERS = MP_PLANNERS + ANALYTIC_PLANNERS + ABLATION_PLANNERS
 MAX_ANALYTIC_POLICIES = 20_000
 
@@ -126,7 +122,7 @@ def run_scenario(scenario, n_episodes=None, max_steps=DEFAULT_STEPS,
                  per_step_goal=None, stop_at_goal=None,
                  action_select=None,
                  shrinking_horizon=DEFAULT_SHRINKING_HORIZON,
-                 planner="coupled-mp", maze="trap", quiet=False,
+                 planner="SP-EFE", maze="trap", quiet=False,
                  collect_frames=True):
     """Run one scenario; returns dict with frames and metrics.
 
@@ -393,7 +389,7 @@ def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
     blocks = _learn_a_blocks(n_episodes)
     for maze in mazes:
         print(f"{maze} maze, {scenario} ({n_episodes} eps × {n_seeds} seeds):")
-        print(f"  {'planner':16s}  {'goal':8s}  {'sink':8s}  {'top':8s}  "
+        print(f"  {'planner':26s}  {'goal':8s}  {'sink':8s}  {'top':8s}  "
               f"{'last':10s}  {err_lab:6s} " +
               "  ".join(f"{lo}-{end:>2d}" for lo, end in blocks))
         for planner in planners:
@@ -408,7 +404,7 @@ def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
             last_n = aggs[0]["last_block"]
             blk = [np.mean([a["blocks"][f"{lo}-{end}"] for a in aggs])
                     for lo, end in blocks]
-            print(f"  {planner:16s}  {g:.1f}/{n:<4d}  {sk:.1f}/{n:<4d}  "
+            print(f"  {planner:26s}  {g:.1f}/{n:<4d}  {sk:.1f}/{n:<4d}  "
                   f"{top:.1f}/{n:<4d}  {last:.1f}/{last_n:<6d}  {err:.4f}  "
                   + "  ".join(f"{r:.2f}" for r in blk))
         print()
@@ -556,21 +552,21 @@ def compare_mazes(mazes=("trap", "fog"), planners=None,
 
     for maze in mazes:
         print(f"{maze} maze, known ({n_known_seeds} seeds):")
-        print(f"  {'planner':16s}  {'goal':8s}  {'sink':8s}  "
+        print(f"  {'planner':26s}  {'goal':8s}  {'sink':8s}  "
               f"{'top-row':8s}  steps")
         for planner in planners:
             a = _agg_known(known[maze][planner])
             steps = "—" if a["steps"] is None else f"{a['steps']:.1f}"
-            print(f"  {planner:16s}  {a['goals']}/{a['n']:<5d}  "
+            print(f"  {planner:26s}  {a['goals']}/{a['n']:<5d}  "
                   f"{a['sinks']}/{a['n']:<5d}  {a['top']}/{a['n']:<5d}  {steps}")
         print()
         print(f"{maze} maze, learn-B ({n_learn_episodes} eps):")
-        print(f"  {'planner':16s}  {'goal':8s}  {'sink':8s}  "
+        print(f"  {'planner':26s}  {'goal':8s}  {'sink':8s}  "
               f"{'first':6s}  {'last-block':10s}  errB")
         for planner in planners:
             b = _agg_learn(learn[maze][planner])
             first = "never" if b["first"] is None else str(b["first"])
-            print(f"  {planner:16s}  {b['goals']}/{b['n']:<5d}  "
+            print(f"  {planner:26s}  {b['goals']}/{b['n']:<5d}  "
                   f"{b['sinks']}/{b['n']:<5d}  {first:6s}  "
                   f"{b['last_hits']}/{b['last_block']:<7d}  {b['err']:.4f}")
         print()
@@ -584,7 +580,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scenario", default="all",
                     choices=("known", "learn-A", "learn-B", "all"))
-    ap.add_argument("--planner", default="coupled-mp", choices=PLANNERS,
+    ap.add_argument("--planner", default="SP-EFE", choices=PLANNERS,
                     help="MP planner (analytic EFE is 4^H; skipped at H=11)")
     ap.add_argument("--maze", default="fog-walls",
                     choices=(*MAZE_LAYOUTS, "both"),
@@ -611,11 +607,10 @@ def main():
     ap.add_argument("--prior-count", type=float, default=FLAT)
     ap.add_argument("--preference", type=float, default=DEFAULT_PREFERENCE)
     ap.add_argument("--per-step-goal", default="off",
-                    choices=("on", "off", "additive"),
+                    choices=("on", "off"),
                     help="off: terminal-only x_T ~ goal (baseline); on: "
                          "preference in the channel-refresh locals every "
-                         "step; additive: risk-neutral Bellman sweep in the "
-                         "r(u|x) refresh (use --prior-count 0.01)")
+                         "step")
     ap.add_argument("--stop-at-goal", default="auto",
                     choices=("auto", "on", "off"),
                     help="end episodes on goal entry (auto: on except "
@@ -624,17 +619,15 @@ def main():
                     choices=("auto", "argmax", "sample"),
                     help="action choice from q(u) (auto: argmax)")
     ap.add_argument("--fixed-horizon", action="store_true",
-                    help="plan with a fixed H every step instead of the "
-                         "notebook protocol H = time remaining (default); "
-                         "the graph preference modes park without urgency")
+                    help="plan with a fixed H every step. The default shrinks "
+                         "H to the time remaining")
     ap.add_argument("--save", default=None, metavar="PATH",
                     help="GIF path (default figures/"
                          "stochastic_maze_<scenario>_<planner>.gif)")
     ap.add_argument("--no-gif", action="store_true")
     args = ap.parse_args()
 
-    per_step = {"on": True, "off": False,
-                "additive": "additive"}[args.per_step_goal]
+    per_step = {"on": True, "off": False}[args.per_step_goal]
     planners = (tuple(args.compare_planners) if args.compare_planners
                 else None)
 

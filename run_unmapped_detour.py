@@ -21,12 +21,12 @@ Scenarios
 - ``learn-B`` : unmapped columns flat, Dirichlet counts persist across
   episodes. The benchmark.
 
-Planners: the five MP planners, enumerated ``analytic-efe`` / ``analytic-efe-noamb-noig``
-(4^H policies; H=7 default / H=8 mirror), and ``random`` (uniform actions,
+Planners: the five MP planners, enumerated ``EFE`` / ``EFE-noamb-noig``
+(4^H policies; H=7 default / H=8 mirror), and ``Random`` (uniform actions,
 learning on).
 
 Layouts (``--layout``): ``default`` (5×4 above) separates coupled from
-``pref-sp-plan`` only — uncorrected ``pref-sp`` walks the index-order detour.
+``SP-Pref-Plan`` only — uncorrected ``SP-Pref`` walks the index-order detour.
 ``mirror`` (6×4: detour ``↑↑←←←←←↓``, no pocket; G at (0,2), top-left unmapped).
 ``--action-order`` relabels the action indices (robustness check for tie-break luck).
 ``--unmapped doors --layout mirror`` is the WEST-detour doors variant (no pocket).
@@ -46,7 +46,7 @@ Examples
     uv run python run_unmapped_detour.py --compare
     uv run python run_unmapped_detour.py --compare --layout mirror --episodes 300 --n-seeds 3
     uv run python run_unmapped_detour.py --layout mirror --action-order WSEN --scenario learn-B
-    uv run python run_unmapped_detour.py --scenario learn-B --planners coupled-nodyn pref-sp-plan random
+    uv run python run_unmapped_detour.py --scenario learn-B --planners SP-EFE-dyn SP-Pref-Plan Random
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ from environments.unmapped_detour import (
     DEFAULT_STEPS, DEFAULT_GATE_P, DEFAULT_UNMAPPED_MODE, UNMAPPED_MODES,
     UnmappedDetourEnv, UnmappedDetourGrid,
 )
-from spmp.sp_efe import COUPLED_IGC_PLANNERS
+from spmp.sp_efe import SP_EFE_IGC_PLANNERS
 from agent import (
     CLAMP, FLAT, choose_action, filter_step, horizon_at, matrix_error,
     posterior_mean_B, update_counts_B,
@@ -77,19 +77,16 @@ from dispatch import (
 from run_fog_walls import _trailing_mean
 
 MAX_ANALYTIC_POLICIES = 4 ** 8  # mirror detour is H=8 (65536 policies)
-STATE_ANALYTICS = ("analytic-efe", "analytic-efe-noamb-noig")
-RANDOM = "random"
-# ``coupled-*-igc`` (Δ_A / Δ_B dropped, channels kept) are ablation planners.
-ALL_PLANNERS = MP_PLANNERS + COUPLED_IGC_PLANNERS + STATE_ANALYTICS + (RANDOM,)
+STATE_ANALYTICS = ("EFE", "EFE-noamb-noig")
+RANDOM = "Random"
+# The ``-DeltaA-DeltaB`` labels (Δ_A / Δ_B dropped, channels kept) are ablations.
+ALL_PLANNERS = MP_PLANNERS + SP_EFE_IGC_PLANNERS + STATE_ANALYTICS + (RANDOM,)
 DEFAULT_PLANNERS = MP_PLANNERS + (RANDOM,)
 SCENARIOS = ("known", "frozen", "learn-B")
 DEFAULT_EPISODES = {"known": 20, "frozen": 20, "learn-B": 200}
 DEFAULT_N_SEEDS = {"known": 1, "frozen": 1, "learn-B": 5}
 DEFAULT_PREFERENCE = 4.0
 N_BLOCKS = 10
-
-PRETTY = dict(PRETTY, **{RANDOM: "random"})
-STYLE = dict(STYLE, **{RANDOM: dict(color="0.5", ls=":", marker="")})
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +321,7 @@ def compare(grid, planners, scenario, n_episodes, seeds,
     print()
     tv_head = f"{'tv':12s} " if grid.noisy_tv else ""
     rest_head = f"{'rest':12s} " if grid.rest_idx else ""
-    print(f"  {'planner':16s} {'goal':14s} {'last-'+str(block):10s} "
+    print(f"  {'planner':26s} {'goal':14s} {'last-'+str(block):10s} "
           f"{'detour':12s} {'last-det':10s} {'gate':12s} {tv_head}{'deadend':12s} "
           f"{rest_head}{'steps':10s} {'cols':10s} {'ident':10s} errB")
     for planner in planners:
@@ -334,7 +331,7 @@ def compare(grid, planners, scenario, n_episodes, seeds,
                    if grid.noisy_tv else "")
         rest_cell = (f"{_fmt_ms([r['n_rest'] for r in rs], '{:.1f}'):12s} "
                      if grid.rest_idx else "")
-        print(f"  {planner:16s} "
+        print(f"  {planner:26s} "
               f"{_fmt_ms([r['n_goal'] for r in rs], '{:.1f}'):14s} "
               f"{_fmt_ms([r['last_hits'] for r in rs], '{:.1f}'):10s} "
               f"{_fmt_ms([r['n_detour'] for r in rs], '{:.1f}'):12s} "
@@ -354,7 +351,7 @@ def compare(grid, planners, scenario, n_episodes, seeds,
     print(f"  goal rate by {block}-ep block (mean over seeds):")
     for planner in planners:
         blocks = np.mean([r["blocks"] for r in runs[planner]], axis=0)
-        print(f"  {planner:16s} " + " ".join(f"{b:.2f}" for b in blocks))
+        print(f"  {planner:26s} " + " ".join(f"{b:.2f}" for b in blocks))
     print()
 
     if out:
@@ -465,7 +462,7 @@ def main():
                     help="'cells': every column of each unmapped cell is flat; "
                          "'doors': only the detour's own (cell, action) pairs "
                          "are flat (the other three actions are known bumps/"
-                         "back). Doors starve pref-sp's action-entropy bonus.")
+                         "back). Doors starve SP-Pref's action-entropy bonus.")
     ap.add_argument("--action-order", default=ACTION_LETTERS,
                     help="relabel action indices, e.g. WSEN (default NESW); "
                          "robustness check for index-order tie-breaks")

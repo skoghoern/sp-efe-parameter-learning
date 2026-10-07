@@ -1,22 +1,13 @@
-"""Paper figures for Section 5 (Experiments) from the saved ``.npz`` arrays.
+"""Figures for the paper's experiments, drawn from the saved ``.npz`` arrays.
 
-Re-renders the fog-walls learn-A and unmapped-detour (doors) learn-B runs of
-the UAI-MP-AIF-JAX repo with the paper's planner names in a 2x3 composite
-(environment, goal rate, secondary metric). No experiment is re-run; only the
-arrays in ``<repo>/figures/`` are read. The two environment panels are drawn
-here rather than by the repo's own helpers so that both share one visual
-vocabulary, spelled out in a figure-level glyph legend.
+Re-renders fog-walls (learn θ_A) and the unmapped detour (learn θ_B) as one
+2×3 page: environment, goal rate, and a second metric. No experiment is
+re-run. The page is saved at a fixed size, without a tight bounding box, so
+including it does not rescale the fonts.
 
-The page is saved at exactly the printed size (``WIDTH_FRAC`` of the 12.2 cm
-LNCS text width) *without* a tight bounding box, so ``\\includegraphics`` does
-not rescale it and the font sizes below are the sizes that reach the page. Keep
-``WIDTH_FRAC`` and the ``width=`` option in ``content/05-experiments.tex`` equal.
+    uv run python paper_figure.py
 
-Run from the paper directory with the code repo's environment, e.g.
-
-    uv run --project "$REPO" python src/make_experiment_figures.py
-
-Outputs ``figures/exp_learning.pdf``.
+Writes ``figures/exp_learning.pdf``.
 """
 
 from __future__ import annotations
@@ -48,22 +39,11 @@ import matplotlib.patches as patches  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 
-# --- paper naming / styling -------------------------------------------------
-# Code planner name -> paper label. Old runs stored the KL baselines as
-# ``kl-vmp`` / ``kl-vmp-corr`` (now ``pref-sp`` / ``pref-sp-plan``); the
-# ``-igc`` runs keep IG_c only, i.e. the Dirichlet novelty terms removed.
-PAPER_NAME = {
-    "coupled-mp": "SP-EFE",
-    "coupled-nodyn": r"SP-EFE$^{-\mathrm{dyn}}$",
-    "coupled-nodelta": r"SP-EFE$^{-\Delta_B}$",
-    "coupled-mp-igc": r"SP-EFE$^{-\Delta_A-\Delta_B}$",
-    "coupled-nodyn-igc": r"SP-EFE$^{-\Delta_A-\Delta_B-\mathrm{dyn}}$",
-    "kl-vmp-corr": "SP-Pref-Plan",
-    "pref-sp-plan": "SP-Pref-Plan",
-    "kl-vmp": "SP-Pref",
-    "pref-sp": "SP-Pref",
-    "random": "Random",
-}
+from dispatch import PRETTY as PAPER_NAME  # noqa: E402
+
+# --- paper styling ----------------------------------------------------------
+# Keys are the paper labels, which are also the ``.npz`` keys. ``PAPER_NAME``
+# is the same label typeset with superscripts.
 # Planner colours are reserved for curves only; the environment panels use
 # purple / grey routes so no hue means two things in one figure.
 _EFE = "#D55E00"
@@ -71,18 +51,16 @@ _NODYN = "#0072B2"
 _PREF_PLAN = "#009E73"
 _PREF = "#56B4E9"
 STYLE = {
-    "coupled-mp": dict(color=_EFE, ls="-", lw=1.5, zorder=6),
-    "coupled-nodyn": dict(color=_NODYN, ls="-", lw=1.1, zorder=5),
-    "coupled-nodelta": dict(color="#CC79A7", ls="-", lw=1.1, zorder=4),
-    "coupled-mp-igc": dict(color="#8B5A00", ls=(0, (3.0, 1.1, 0.8, 1.1)),
+    "SP-EFE": dict(color=_EFE, ls="-", lw=1.5, zorder=6),
+    "SP-EFE-dyn": dict(color=_NODYN, ls="-", lw=1.1, zorder=5),
+    "SP-EFE-DeltaB": dict(color="#CC79A7", ls="-", lw=1.1, zorder=4),
+    "SP-EFE-DeltaA-DeltaB": dict(color="#8B5A00", ls=(0, (3.0, 1.1, 0.8, 1.1)),
                            lw=1.2, zorder=4),
-    "coupled-nodyn-igc": dict(color="#8B5A00", ls=(0, (3.0, 1.1, 0.8, 1.1)),
+    "SP-EFE-DeltaA-DeltaB-dyn": dict(color="#8B5A00", ls=(0, (3.0, 1.1, 0.8, 1.1)),
                               lw=1.2, zorder=4),
-    "kl-vmp-corr": dict(color=_PREF_PLAN, ls="--", lw=1.3, zorder=5),
-    "pref-sp-plan": dict(color=_PREF_PLAN, ls="--", lw=1.3, zorder=5),
-    "kl-vmp": dict(color=_PREF, ls="-.", lw=1.1, zorder=4),
-    "pref-sp": dict(color=_PREF, ls="-.", lw=1.1, zorder=4),
-    "random": dict(color="0.45", ls=":", lw=1.0, zorder=3),
+    "SP-Pref-Plan": dict(color=_PREF_PLAN, ls="--", lw=1.3, zorder=5),
+    "SP-Pref": dict(color=_PREF, ls="-.", lw=1.1, zorder=4),
+    "Random": dict(color="0.45", ls=":", lw=1.0, zorder=3),
 }
 # Shared cell/route vocabulary for both environment panels.
 MAZE = {
@@ -122,7 +100,7 @@ RC = {
     "savefig.bbox": None,   # keep the exact figsize: no rescaling in LaTeX
 }
 TEXTWIDTH_IN = 12.2 / 2.54  # LNCS text width, 4.803 in
-# Keep this in step with the \includegraphics width in content/05-experiments.tex:
+# Fraction of a 12.2 cm text width. Match this if the figure is included.
 # the figure is saved at its final printed size so LaTeX never rescales it.
 WIDTH_FRAC = 0.92
 FIG_WIDTH_IN = WIDTH_FRAC * TEXTWIDTH_IN
@@ -295,9 +273,9 @@ def draw_detour(ax):
 
 
 # --- Row 1: fog-walls learn-A ----------------------------------------------
-def draw_learn_a(axes, planners=("coupled-mp", "coupled-nodyn", "kl-vmp-corr",
-                                 "kl-vmp"),
-                 ablations=("coupled-mp-igc", "random")):
+def draw_learn_a(axes, planners=("SP-EFE", "SP-EFE-dyn", "SP-Pref-Plan",
+                                 "SP-Pref"),
+                 ablations=("SP-EFE-DeltaA-DeltaB", "Random")):
     """Fog-walls learn-A row: layout, goal rate, A-matrix error."""
     draw_fog_walls(axes[0])
     axes[0].set_title(r"(a) fog-walls: learn $\theta_A$", loc="left", pad=2.5)
@@ -340,8 +318,8 @@ def draw_learn_a(axes, planners=("coupled-mp", "coupled-nodyn", "kl-vmp-corr",
 
 
 # --- Row 2: unmapped detour (doors) learn-B --------------------------------
-def draw_learn_b(axes, planners=("coupled-mp", "coupled-nodyn", "kl-vmp-corr",
-                                 "kl-vmp", "random")):
+def draw_learn_b(axes, planners=("SP-EFE", "SP-EFE-dyn", "SP-Pref-Plan",
+                                 "SP-Pref", "Random")):
     """Unmapped-detour (doors) learn-B row: layout, goal rate, detour rate."""
     d = load_npz(LEARN_B_NPZ)
     n_ep, gate_p = int(d["n_episodes"]), float(d["gate_p"])
@@ -375,8 +353,8 @@ def draw_learn_b(axes, planners=("coupled-mp", "coupled-nodyn", "kl-vmp-corr",
 # --- legends ----------------------------------------------------------------
 def planner_handles():
     """Curve legend, shared by both rows (order follows the paper's table)."""
-    keys = ("coupled-mp", "coupled-nodyn", "coupled-mp-igc", "kl-vmp-corr",
-            "kl-vmp", "random")
+    keys = ("SP-EFE", "SP-EFE-dyn", "SP-EFE-DeltaA-DeltaB", "SP-Pref-Plan",
+            "SP-Pref", "Random")
     return [Line2D([], [], label=PAPER_NAME[k], **STYLE[k]) for k in keys]
 
 

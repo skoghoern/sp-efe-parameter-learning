@@ -6,12 +6,21 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "jax>=0.6.2",
+    "jaxtyping>=0.3.11",
     "matplotlib>=3.10.8",
     "numpy>=2.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["environments*", "inference*"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
