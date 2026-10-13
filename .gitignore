@@ -3,9 +3,3 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ipynb_checkpoints/
-
-# Generated images (the committed .npz arrays under figures/data are tracked)
-figures/figures/*.png
-figures/figures/**/*.png
-figures/figures/*.gif
-figures/figures/**/*.gif
