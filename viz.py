@@ -1,6 +1,6 @@
 """Episode rendering for the fog-walls maze: belief overlays and GIFs.
 
-Not used by the paper -- ``paper_figure.py`` draws its own environment panels so
+Not used by the paper -- ``figures/paper_figure.py`` draws its own environment panels so
 both share one visual vocabulary. This is here for inspecting a single episode:
 ``run_fog_walls.py --save-gif`` writes a frame per step showing the agent, the
 belief q(x), the action posterior q(u), and the matrix being learned.
@@ -141,7 +141,7 @@ def save_gif(result, path, interval_ms=None, hold_frames=3):
     maze_ax = fig.add_subplot(gs[0, 0])
     act_ax = fig.add_subplot(gs[0, 1])
     mat_ax = fig.add_subplot(gs[1, :])
-    fig.suptitle(f"Stochastic maze ({result.get('maze', 'trap')}) — "
+    fig.suptitle(f"Stochastic maze ({result.get('maze', 'fog-walls')}) — "
                  f"{result.get('planner', 'SP-EFE')}"
                  f" — {scenario}  (H={result['horizon']}"
                  f"{'↓' if result.get('shrinking_horizon') else ''})",

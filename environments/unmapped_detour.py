@@ -651,8 +651,8 @@ def _layout_legend_handles(pocket=False):
     return handles
 
 
-def save_layout_figures(out_dir="figures", layouts=None, dpi=300):
-    """Write per-layout and combined camera-ready PNGs (and PDFs).
+def save_layout_figures(out_dir="figures/figures", layouts=None, dpi=300):
+    """Write per-layout and combined camera-ready PNGs (and PDFs) to ``out_dir``.
 
     The published mirror panel is ``mirror-nopocket`` (the decoy pocket is
     not load-bearing) but is still saved as ``unmapped_detour_layout_mirror``.

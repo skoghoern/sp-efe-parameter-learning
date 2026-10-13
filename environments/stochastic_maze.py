@@ -1,54 +1,26 @@
-"""Stochastic maze, ported from the RxInferExamples.jl notebook
-``EFE Minimization via Message Passing.ipynb``.
+"""Fog-walls maze: the paper's learn-θ_A benchmark.
 
-A 5×5 gridworld where the agent navigates toward a goal state, impeded by:
+A 5×5 gridworld. The agent starts at ``(0, 2)`` and the goal is ``(4, 2)``
+(``y`` points up; state ``s = x + y * GRID_X``). Two routes:
 
-- **sink states** that trap the agent (every action keeps it in place);
-- **stochastic transition cells** ("drift"): the intended move succeeds
-  with probability ``1 - p`` and with probability ``p`` the agent drifts in
-  one of the cell's drift directions (uniformly), walls = stay. The default
-  layout is a *conveyor + trap*: the two approach cells (1,2), (2,2) drift
-  East with ``p = 0.5`` (the row "carries" the agent toward the goal), the
-  last cell (3,2) drifts up/down with ``p = 0.7`` — straight into the two
-  sinks that flank it (see ``DRIFT_SPEC``);
-- **noisy observation cells**: the agent perceives its true position only
-  20% of the time and with 80% probability observes one of the in-bounds
-  adjacent cells (including diagonals), uniformly.
+- a 4-step middle row through a drift cell and a fog block;
+- an 8-step top row that is deterministic and observation-exact.
 
-There is a short path to the goal, but it crosses the stochastic drift and
-noisy-observation cells; a longer path along the top row is fully
-deterministic and noise-free.
+``FOG_CELLS`` share one observation: each column of ``A`` is uniform over
+the block, so the agent cannot tell which fog cell it occupies. ``(1, 2)``
+also drifts north or south with probability 0.6. ``(2, 0)`` is noisy in
+the usual way: the true cell with probability ``1 - OBS_NOISE``, otherwise
+a uniform in-bounds neighbor (diagonals included).
 
-The default drift layout is chosen so that the preference-driven planners
-(SP-Pref / SP-Pref-Plan) are lured into the short row — their route is
-A-independent, so the conveyor's pull toward the goal is all they see — and
-never take the top row, whereas the ambiguity-aware SP-EFE planner takes
-the safe top-row detour on every seed. The notebook's original uniform drift
-(0.7 over up/down) is available via
-``build_B(drift_spec=NOTEBOOK_DRIFT_SPEC)``.
+``FOG_WALLS`` are impassable interior cells (a move into one stays put).
+Mislocalisation in the fog costs a bump and a detour, so a learner can
+survive long enough to learn which cells are foggy.
 
-Coordinates: the notebook uses Julia ``CartesianIndex(row, col)`` with
-row 1 at the top and column-major linear indices. Here we use the repo
-convention ``(x, y)`` with ``y`` pointing up and linear state
-``s = x + y * GRID_X``; the mapping is ``x = col - 1``, ``y = n_rows - row``.
-Notebook cells (translated):
-
-- goal (3,5) -> (4, 2);  start (3,1) -> (0, 2)
-- sinks (2,4), (4,4) -> (3, 3), (3, 1)
-- stochastic drift (3,2), (3,3), (3,4) -> (1, 2), (2, 2), (3, 2)
-- noisy observations: the 3x3 block around the central drift row plus
-  (5,3) -> (1..3, 1..3) and (2, 0)
-
-Actions: NORTH (y+1), EAST (x+1), SOUTH (y-1), WEST (x-1); walls = stay.
-(The notebook enumerates South/North/East/West; the order is arbitrary.)
-
-The observation model is a single modality (obs = state index, possibly
-noisy). ``build_A`` returns the planner-native padded ``(F=1, C, S)``
-layout; ``build_A_matrix`` the raw (C, S) matrix used by the environment.
-
-``depict`` reproduces the notebook's visualization (green goal, red sinks,
-grey noisy cells, tan drift bands, blue agent) and ``animate_trajectory``
-its trajectory GIF.
+Actions: NORTH (y+1), EAST (x+1), SOUTH (y-1), WEST (x-1); grid edges
+stay. ``build_A`` is the planner-native ``(1, S, S)`` likelihood;
+``build_A_matrix`` the ``(S, S)`` matrix the environment samples.
+``depict`` draws the grid (green goal, dark walls, hatched fog, tan drift,
+blue agent).
 """
 
 from __future__ import annotations
@@ -63,29 +35,13 @@ ACTION_SYMBOLS = ["↑", "→", "↓", "←"]
 # action -> (dx, dy); NORTH increases y
 ACTION_DXY = {0: (0, 1), 1: (1, 0), 2: (0, -1), 3: (-1, 0)}
 
-# Notebook example_grid, translated to (x, y) with y up (see module doc)
-SINK_STATES = ((3, 3), (3, 1))
-STOCHASTIC_STATES = ((1, 2), (2, 2), (3, 2))
-NOISY_OBSERVATIONS = (
-    (1, 3), (2, 3), (3, 3),
-    (1, 2), (2, 2), (3, 2),
-    (1, 1), (2, 1), (3, 1),
-    (2, 0),
-)
 GOAL_XY = (4, 2)
 START_XY = (0, 2)
-OBS_NOISE = 0.8         # off-cell observation mass in noisy cells
+OBS_NOISE = 0.8         # off-cell observation mass in the noisy cell
 
 # Drift spec: {(x, y): (drift_prob, drift_actions)}; drift mass is spread
 # uniformly over drift_actions, the remainder follows the intended action.
 NORTH, EAST, SOUTH, WEST = range(4)
-DRIFT_SPEC = {
-    (1, 2): (0.5, (EAST,)),           # conveyor toward the goal
-    (2, 2): (0.5, (EAST,)),
-    (3, 2): (0.7, (NORTH, SOUTH)),    # trap: both neighbours are sinks
-}
-# Original uniform drift (0.7 over up/down), kept so tests can compare layouts.
-NOTEBOOK_DRIFT_SPEC = {c: (0.7, (NORTH, SOUTH)) for c in STOCHASTIC_STATES}
 
 
 def xy_to_state(x, y, grid_x=None):
@@ -101,17 +57,12 @@ def state_to_xy(s, grid_x=None):
 GOAL_STATE = xy_to_state(*GOAL_XY)
 START_STATE = xy_to_state(*START_XY)
 
-# Fog maze (docs/stochastic_maze_fog_results.md): four sinks, one non-lethal
-# drift, a 5-cell fog block whose observations are uniform over the block.
-SINKS4 = ((2, 1), (2, 3), (3, 1), (3, 3))
+# Fog block: observations are uniform over these cells. The drift cell is
+# inside the block. FOG_WALLS are impassable (bump = stay).
 FOG_CELLS = ((1, 1), (1, 2), (1, 3), (2, 2), (3, 2))
 FOG_DRIFT_SPEC = {(1, 2): (0.6, (NORTH, SOUTH))}
 FOG_NOISY_OBSERVATIONS = ((2, 0),)
-# Fog-walls (docs/fog_walls_learnA_results.md): the fog maze with its four
-# sinks replaced by impassable walls. Mislocalisation in the fog now costs
-# bumps and detours instead of the episode, so a novelty-driven learner can
-# survive long enough to learn which cells are foggy.
-FOG_WALLS = SINKS4
+FOG_WALLS = ((2, 1), (2, 3), (3, 1), (3, 3))
 # Cells on the 8-step deterministic top-row route (start → goal).
 TOP_ROW_CELLS = (
     (0, 2), (0, 3), (0, 4),
@@ -131,8 +82,8 @@ def _move(x, y, action, grid_x=None, grid_y=None):
     return x, y
 
 
-def build_B(sink_states=SINK_STATES, drift_spec=DRIFT_SPEC,
-            grid_x=None, grid_y=None, wall_states=()):
+def build_B(sink_states=(), drift_spec=FOG_DRIFT_SPEC,
+            grid_x=None, grid_y=None, wall_states=FOG_WALLS):
     """Transition tensor B[next, current, action], (S, S, 4).
 
     Sinks self-loop. A drift cell ``(x, y): (p, dirs)`` mixes
@@ -188,9 +139,14 @@ def _neighbors(x, y, grid_x=None, grid_y=None):
     return out
 
 
-def build_A_matrix(noisy_observations=NOISY_OBSERVATIONS,
-                   obs_noise=OBS_NOISE, grid_x=None, grid_y=None):
-    """Observation matrix A[obs, state], (S, S)."""
+def build_A_matrix(noisy_observations=FOG_NOISY_OBSERVATIONS,
+                   obs_noise=OBS_NOISE, grid_x=None, grid_y=None,
+                   fog_cells=FOG_CELLS):
+    """Observation matrix A[obs, state], (S, S).
+
+    Noisy cells put ``obs_noise`` on in-bounds neighbors. Fog-cell columns
+    are then overwritten to uniform over ``fog_cells``.
+    """
     gx = GRID_X if grid_x is None else int(grid_x)
     gy = GRID_Y if grid_y is None else int(grid_y)
     n_states = gx * gy
@@ -202,14 +158,17 @@ def build_A_matrix(noisy_observations=NOISY_OBSERVATIONS,
         adj = _neighbors(x, y, grid_x=gx, grid_y=gy)
         for a_s in adj:
             A[a_s, s] = obs_noise / len(adj)
+    if fog_cells:
+        apply_fog_columns(A, fog_cells, gx)
     return A.astype(np.float32)
 
 
-def build_A(noisy_observations=NOISY_OBSERVATIONS, obs_noise=OBS_NOISE,
-            grid_x=None, grid_y=None):
-    """Planner-native single-modality likelihood (1, S, S)."""
+def build_A(noisy_observations=FOG_NOISY_OBSERVATIONS, obs_noise=OBS_NOISE,
+            grid_x=None, grid_y=None, fog_cells=FOG_CELLS):
+    """Planner-native fog-walls likelihood (1, S, S)."""
     return build_A_matrix(
-        noisy_observations, obs_noise, grid_x=grid_x, grid_y=grid_y)[None]
+        noisy_observations, obs_noise, grid_x=grid_x, grid_y=grid_y,
+        fog_cells=fog_cells)[None]
 
 
 def valid_A_mask(n_states=None):
@@ -255,12 +214,11 @@ def apply_fog_columns(A, fog_cells, grid_x):
 
 
 def build_fog_A_matrix():
-    """5x5 fog-block likelihood: uniform 1/5 over FOG_CELLS, (2,0) still noisy."""
-    A = build_A_matrix(noisy_observations=FOG_NOISY_OBSERVATIONS)
-    return apply_fog_columns(A, FOG_CELLS, GRID_X).astype(np.float32)
+    """Fog-walls likelihood: uniform 1/5 over FOG_CELLS, (2, 0) still noisy."""
+    return build_A_matrix()
 
 
-MAZE_LAYOUTS = ("fog-walls", "fog", "trap")
+MAZE_LAYOUTS = ("fog-walls",)
 
 
 def _meta(name, grid_x, grid_y, start_xy, goal_xy, sink_states, drift_spec,
@@ -280,29 +238,15 @@ def _meta(name, grid_x, grid_y, start_xy, goal_xy, sink_states, drift_spec,
 
 
 def maze_tensors(name="fog-walls"):
-    """Planner A ``(1, C, S)``, B, and layout meta."""
-    if name == "trap":
-        A = build_A()
-        B = build_B()
-        meta = _meta(
-            "trap", GRID_X, GRID_Y, START_XY, GOAL_XY, SINK_STATES,
-            DRIFT_SPEC, NOISY_OBSERVATIONS, (), TOP_ROW_CELLS, 11)
-    elif name == "fog":
-        A = build_fog_A_matrix()[None]
-        B = build_B(sink_states=SINKS4, drift_spec=FOG_DRIFT_SPEC)
-        meta = _meta(
-            "fog", GRID_X, GRID_Y, START_XY, GOAL_XY, SINKS4,
-            FOG_DRIFT_SPEC, FOG_NOISY_OBSERVATIONS, FOG_CELLS, TOP_ROW_CELLS, 11)
-    elif name == "fog-walls":
-        A = build_fog_A_matrix()[None]
-        B = build_B(sink_states=(), drift_spec=FOG_DRIFT_SPEC,
-                    wall_states=FOG_WALLS)
-        meta = _meta(
-            "fog-walls", GRID_X, GRID_Y, START_XY, GOAL_XY, (),
-            FOG_DRIFT_SPEC, FOG_NOISY_OBSERVATIONS, FOG_CELLS, TOP_ROW_CELLS,
-            11, wall_states=FOG_WALLS)
-    else:
+    """Planner A ``(1, C, S)``, B, and layout meta for fog-walls."""
+    if name != "fog-walls":
         raise ValueError(f"unknown maze {name!r}; choose from {MAZE_LAYOUTS}")
+    A = build_A()
+    B = build_B()
+    meta = _meta(
+        "fog-walls", GRID_X, GRID_Y, START_XY, GOAL_XY, (),
+        FOG_DRIFT_SPEC, FOG_NOISY_OBSERVATIONS, FOG_CELLS, TOP_ROW_CELLS,
+        11, wall_states=FOG_WALLS)
     return A, B, meta
 
 
@@ -355,10 +299,10 @@ class StochasticMazeEnv:
 # ---------------------------------------------------------------------------
 # Visualization
 # ---------------------------------------------------------------------------
-def depict(player=None, ax=None, drift_spec=DRIFT_SPEC,
-           sink_states=SINK_STATES, noisy_observations=NOISY_OBSERVATIONS,
-           fog_cells=(), grid_x=None, grid_y=None, goal_xy=None,
-           wall_states=()):
+def depict(player=None, ax=None, drift_spec=FOG_DRIFT_SPEC,
+           sink_states=(), noisy_observations=FOG_NOISY_OBSERVATIONS,
+           fog_cells=FOG_CELLS, grid_x=None, grid_y=None, goal_xy=None,
+           wall_states=FOG_WALLS):
     """Draw the maze and return the axes."""
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches

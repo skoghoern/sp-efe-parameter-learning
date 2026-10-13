@@ -9,6 +9,16 @@ learning of the observation block $\theta_A$ and the transition block $\theta_B$
 survives alongside the information-gain corrections. This repository contains the
 message passing scheme and the two grid POMDPs used to validate it.
 
+![Fog-walls, known model, horizon 8. SP-EFE takes the unambiguous top row; SP-Pref-Plan walks east into the fog.](figures/figures/fog_walls_known_H8_pair.gif)
+
+
+| ![Doors detour, SP-EFE: the safe route, and still the safe route once the doors are learned.](figures/figures/detour_sp_efe.gif) | ![Doors detour, SP-Pref: the safe route while the transitions are uniform (minor p of directly landing on G), then the ice.](figures/figures/detour_sp_pref.gif) |
+| -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SP-EFE stays on the safe route once the doors are learned.                                                                       | SP-Pref takes the safe route while the transitions are uniform (minor p of directly landing on G), then the ice.                                                 |
+
+
+
+
 ## Installation
 
 ```bash
@@ -33,20 +43,25 @@ of appears there at a size you can read off the terminal.
 Then follow the code in this order:
 
 
-| Read                                         | For                                                           |
-| -------------------------------------------- | ------------------------------------------------------------- |
-| `spmp/sweeps.py`                             | the factor graph, one sum-product sweep, channel damping      |
-| `spmp/tables.py`                             | how $\theta$ enters the graph: two expected-log tables        |
-| `spmp/info_gain.py`                          | $\Delta_A,\Delta_B$ — the per-entry $e^{\Delta}\ge1$ weights  |
+| Read                                         | For                                                                                                              |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `spmp/sweeps.py`                             | the factor graph, one sum-product sweep, channel damping                                                         |
+| `spmp/tables.py`                             | how $\theta$ enters the graph: two expected-log tables                                                           |
+| `spmp/info_gain.py`                          | $\Delta_A,\Delta_B$ — the per-entry $e^{\Delta}\ge1$ weights                                                     |
 | `spmp/sp_efe.py`                             | **SP-EFE**: the two kernels, the fixed point, the entry point; SP-Pref / SP-Pref-Plan are its all-flags-off rows |
-| `agent.py`                                   | the filter, count update and action rule every planner shares |
-| `run_fog_walls.py`, `run_unmapped_detour.py` | the two experiments                                           |
+| `agent.py`                                   | the filter, count update and action rule every planner shares                                                    |
+| `run_fog_walls.py`, `run_unmapped_detour.py` | the two experiments                                                                                              |
 
 
 The whole scheme is two kernels:
 
-$$\log g_{\text{obs}}(y,x) = \log \tilde A + \log r(y\mid x) + c\Delta_A$$
-$$\log g_{\text{dyn}}(x',x,u) = \log \tilde B + \Delta_B + \log r(u\mid x) - \log r(x'\mid x,u)$$
+$$
+\log g_{\text{obs}}(y,x) = \log \tilde A + \log r(y\mid x) + c\Delta_A
+$$
+
+$$
+\log g_{\text{dyn}}(x',x,u) = \log \tilde B + \Delta_B + \log r(u\mid x) - \log r(x'\mid x,u)
+$$
 
 Each channel $r$ is substituted at its closed-form optimum — the corresponding
 conditional of $q$ — so a sweep is plain sum-product and the channels are
@@ -59,21 +74,26 @@ and `objective_terms` is the objective written out term by term.
 
 ## Planner names
 
-`--planner` / `--planners`, the saved `.npz` keys, and `paper_figure.py` use the paper's labels. A superscript in the paper is a hyphenated suffix here: `SP-EFE-dyn` is SP-EFE with a −dyn superscript.
+`--planner` / `--planners`, the saved `.npz` keys, and `figures/paper_figure.py` use the paper's labels. A superscript in the paper is a hyphenated suffix here: `SP-EFE-dyn` is SP-EFE with a −dyn superscript.
 
 
-| Label                        | Terms kept                                              |
-| ---------------------------- | ------------------------------------------------------- |
-| `SP-EFE`                     | full scheme: obs + dyn channels, $\Delta_A$, $\Delta_B$ |
-| `SP-EFE-dyn`                 | no dynamics channel                                     |
-| `SP-EFE-DeltaB`              | dynamics channel on, $\Delta_B$ off                     |
-| `SP-EFE-DeltaA-DeltaB`       | channels only (ambiguity, no novelty)                   |
-| `SP-EFE-DeltaA-DeltaB-dyn`   | as above, channel dropped too                           |
-| `SP-Pref-Plan`               | planning correction $r_t(u_t\mid x_{t-1})$ only         |
-| `SP-Pref`                    | no corrections                                          |
-| `EFE`                        | enumerates all $4^H$ policies under the exact EFE       |
-| `EFE-noamb-noig`             | enumerated EFE with ambiguity and both novelty terms zeroed |
-| `Random`                     | uniform actions, learning still on                      |
+| Label                      | Terms kept                                                                               |
+| -------------------------- | ---------------------------------------------------------------------------------------- |
+| `SP-EFE`                   | full scheme: obs + dyn channels, $\Delta_A$, $\Delta_B$                                  |
+| `SP-EFE-dyn`               | no dynamics channel                                                                      |
+| `SP-EFE-DeltaB`            | dynamics channel on, $\Delta_B$ off                                                      |
+| `SP-EFE-DeltaA-DeltaB`     | channels only (ambiguity, no novelty)                                                    |
+| `SP-EFE-DeltaA-DeltaB-dyn` | as above, channel dropped too                                                            |
+| `SP-Pref-Plan`             | planning correction $r_t(u_t\mid x_{t-1})$ only                                          |
+| `SP-Pref`                  | no corrections                                                                           |
+| `EFE`                      | enumerates all $4^H$ policies under the exact EFE                                        |
+| `EFE-noamb-noig`           | enumerated EFE with ambiguity and both novelty terms zeroed                              |
+| `SI-EFE`                   | sophisticated inference over the same one-step EFE terms, counts updated inside the tree |
+| `SI-EFE-frozen`            | as `SI-EFE`, counts fixed inside the tree                                                |
+| `Random`                   | uniform actions, learning still on                                                       |
+
+
+
 
 ## Reproducing the paper
 
@@ -130,16 +150,18 @@ uv run python run_unmapped_detour.py --unmapped cells --compare \
     --episodes 200 --n-seeds 5
 ```
 
-Each run prints a summary table and writes `figures/<tag>.{npz,pdf,png}`. Use
-`--save` / `--out` to redirect so the committed arrays are not overwritten.
+Each run prints a summary table and writes `figures/data/<tag>.npz` plus
+`figures/figures/<tag>.{pdf,png}`. A `--out` or `--save` prefix inside
+`figures/` is split the same way; any other prefix keeps the files together.
+Use those flags to redirect so the committed arrays are not overwritten.
 
 ### The paper figure
 
-`figures/` ships the `.npz` arrays behind Figure 2, so the figure can be redrawn
-without re-running anything (about a second):
+`figures/data/` ships the `.npz` arrays behind Figure 2, so the figure can be
+redrawn without re-running anything (about a second):
 
 ```bash
-uv run python paper_figure.py
+uv run python figures/paper_figure.py
 ```
 
 Set `SP_EFE_FIG_OUT=/path/to/paper/figures` to write `exp_learning.pdf` straight
@@ -157,29 +179,22 @@ spmp/            sum-product message passing (the paper's SP-MP)
   sp_efe.py      kernels, channel fixed point, entry point, flags for every planner row
 agent.py         the one shared protocol: filter, count update, action rule
 dispatch.py      planner name -> planner, plus the enumerated EFE
+sophisticated.py the enumerated EFE's terms recursed over outcomes (SI-EFE)
 environments/
-  stochastic_maze.py    fog-walls (and the layouts it shares code with)
+  stochastic_maze.py    fog-walls, the learn-θ_A maze
   unmapped_detour.py    unmapped detour, doors and cells variants
 run_fog_walls.py        learn-θ_A experiment (learn-A / learn-B / known)
 run_unmapped_detour.py  learn-θ_B experiment (learn-B / known / frozen)
-paper_figure.py         redraws the paper figure from figures/*.npz
 viz.py                  single-episode belief overlays and GIFs (not used by the paper)
-tests/           51 tests over tensors, planners, the demo and the episode loops
+figures/
+  paper_figure.py       redraws the paper figure from data/*.npz
+  make_detour_gifs.py   conference GIFs of the doors detour
+  paths.py              save prefix -> data/ and figures/
+  data/                 .npz archives and run logs
+  figures/              rendered png, pdf, gif
+tests/           52 tests over tensors, planners, the demo and the episode loops
 docs/            per-experiment result write-ups
 ```
-
-Two design notes worth knowing before reading. First, `spmp/sp_efe.py` holds the
-kernels, the fixed point *and* the entry point, so following one sweep does not
-hop between files. Second, `agent.py` is deliberately the only copy of the
-protocol: the experiments compare objectives, so everything outside the
-objective — the filter, the posterior-mean matrices, the count update, the
-action rule — has to be held fixed, and one implementation is what makes that
-checkable rather than a promise.
-
-Everything outside the objective is shared between planners: the same exact
-filter under the posterior-mean matrices $m_A, m_B$, the same count update, the
-same terminal preference, horizons, sweeps (100 at damping 0.5) and flat
-Dirichlet priors (mass 0.1 per entry, known block clamped at $10^6$).
 
 ## Tests
 

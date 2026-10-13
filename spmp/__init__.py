@@ -1,29 +1,14 @@
-"""SP-MP: sum-product message passing for EFE planning and parameter learning.
+"""Sum-product message passing for EFE planning.
 
-The paper's family term. Every planner here is one SP-MP scheme on the same
-factor graph; the rows of the paper's table differ only in which entropy
-corrections they carry:
+Every planner is ``sp_efe_planning`` under a ``Scheme`` (``paper_scheme``,
+``PAPER_ROWS``). ``dispatch._plan`` adds the enumerated EFE.
 
-``sp_efe.sp_efe_planning``
-    SP-EFE, its four ablations, and the preference-only baselines SP-Pref /
-    SP-Pref-Plan. All are the *same* function under a different ``Scheme``;
-    ``paper_scheme(label)`` gives the paper's rows (``PAPER_ROWS``). Returns a
-    ``PlanResult`` with q(u_1), the planned beliefs, the final kernel and
-    channels, and optionally the objective trace term by term.
+    sweeps.py     factor graph and one sum-product sweep
+    tables.py     Dirichlet expected-log tables
+    info_gain.py  per-entry information gains Δ_A, Δ_B
+    sp_efe.py     kernels, channel fixed point, entry point
 
-``dispatch._plan`` adds the enumerated EFE. Where to read, in order:
-
-    sweeps.py     the factor graph and one sum-product sweep over it
-    tables.py     Dirichlet expected-log tables, the θ interface
-    info_gain.py  Δ_A, Δ_B -- the per-entry e^Δ ≥ 1 information-gain weights
-    sp_efe.py     the two kernels, the channel fixed point, entry point, flags
-
-The filter, the conjugate count update and the episode loop are deliberately not
-here: they are shared by every planner and live in ``agent.py``.
-
-The planner strings on the command line are the paper's labels (``SP-EFE``,
-``SP-Pref``, ...) and are the keys of the saved ``.npz`` arrays. See the
-table in the README.
+The filter, count update, and episode loop live in ``agent.py``.
 """
 
 from .sweeps import (

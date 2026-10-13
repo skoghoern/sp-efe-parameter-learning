@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# Generated run outputs (the committed .npz arrays are tracked explicitly)
-figures/*.png
-figures/*.gif
+# Generated images (the committed .npz arrays under figures/data are tracked)
+figures/figures/*.png
+figures/figures/**/*.png
+figures/figures/*.gif
+figures/figures/**/*.gif

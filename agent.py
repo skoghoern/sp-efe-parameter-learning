@@ -1,9 +1,6 @@
 """Filtering, learning, and action selection shared by every planner.
 
-This is Algorithm 1 of the paper. The experiments compare objectives, so
-everything outside the objective is shared: the same filter, the same
-posterior-mean matrices, the same Dirichlet update, and the same action
-choice from q(u_1).
+This is Algorithm 1 of the paper. Everything outside the objective is shared.
 
 Per step s of a T-step episode:
 

@@ -11,6 +11,7 @@ such as SP-EFE^{-dyn} are display only.
 
 from __future__ import annotations
 
+import functools
 import itertools
 
 import numpy as np
@@ -28,7 +29,10 @@ DEFAULT_DAMPING = 0.5
 IDENTIFIED_MASS = 0.8
 PLANNERS = SP_EFE_PLANNERS + SP_PREF_PLANNERS
 ANALYTIC_PLANNERS = ("EFE", "EFE-noamb-noig")
-ALL_PLANNERS = PLANNERS + ANALYTIC_PLANNERS
+# Sophisticated inference over the same one-step terms (``sophisticated.py``);
+# "-frozen" keeps the counts fixed inside the tree.
+SI_PLANNERS = ("SI-EFE", "SI-EFE-frozen")
+ALL_PLANNERS = PLANNERS + ANALYTIC_PLANNERS + SI_PLANNERS
 PLANNER_CHOICES = ALL_PLANNERS + SP_EFE_IGC_PLANNERS
 
 # Matplotlib mathtext for the same ids. Plain ids stay the npz / CLI keys.
@@ -42,6 +46,8 @@ PRETTY = {
     "SP-Pref-Plan": "SP-Pref-Plan",
     "EFE": "EFE",
     "EFE-noamb-noig": "EFE-noamb-noig",
+    "SI-EFE": "SI-EFE",
+    "SI-EFE-frozen": r"SI-EFE$^{\mathrm{frozen}}$",
     "Random": "Random",
 }
 STYLE = {
@@ -54,6 +60,8 @@ STYLE = {
     "SP-Pref-Plan": dict(color="#006400", ls="-.", marker="D"),
     "EFE": dict(color="#d62728", ls="--", marker="^"),
     "EFE-noamb-noig": dict(color="#8c564b", ls="--", marker="v"),
+    "SI-EFE": dict(color="#e377c2", ls="--", marker="X"),
+    "SI-EFE-frozen": dict(color="#e377c2", ls=":", marker="x"),
     "Random": dict(color="0.5", ls=":", marker=""),
 }
 
@@ -71,6 +79,45 @@ def _mean_B(alpha_B):
 def _dg(x):
     """Digamma on numpy arrays via JAX (avoids a hard scipy import)."""
     return np.asarray(jax_digamma(jnp.asarray(x)))
+
+
+def obs_terms(alpha_A, include_ig=True, digamma=_dg):
+    """Per observation column x: Â, and E_q(θ)[H[p(y|x,θ_A)]] − I(y; θ_A | x).
+
+    ``alpha_A`` is (F, C, K) for any K columns; the expected entropy is the
+    ambiguity term of eq. (7), the mutual information its θ_A log-ratio.
+    """
+    safe_A = np.where(alpha_A > 0, alpha_A, 1.0)
+    a0_A = alpha_A.sum(axis=1, keepdims=True)
+    A_hat = np.where(alpha_A > 0, alpha_A / np.maximum(a0_A, EPS), 0.0)
+    if not include_ig:
+        return A_hat, np.zeros(alpha_A.shape[-1])
+    elog_A = np.where(alpha_A > 0, digamma(safe_A + 1) - digamma(a0_A + 1), 0.0)
+    ambig = -(A_hat * elog_A).sum(axis=(0, 1))
+    kl_A = np.where(alpha_A > 0,
+                    np.log(np.maximum(a0_A, EPS)) - np.log(safe_A)
+                    + digamma(safe_A + 1) - digamma(a0_A + 1), 0.0)
+    ig_A = (A_hat * kl_A).sum(axis=(0, 1))
+    return A_hat, ambig - ig_A
+
+
+def dyn_terms(alpha_B, include_ig=True, digamma=_dg):
+    """Per transition column (x, u): B̂, and Σ_x' B̂ log B̂ − I(x'; θ_B | x, u).
+
+    ``alpha_B`` is (S, ...) with successors on axis 0 and any column layout
+    after it.
+    """
+    safe_B = np.where(alpha_B > 0, alpha_B, 1.0)
+    a0_B = alpha_B.sum(axis=0, keepdims=True)
+    B_hat = np.where(alpha_B > 0, alpha_B / np.maximum(a0_B, EPS), 0.0)
+    log_B = np.where(B_hat > 0, np.log(np.where(B_hat > 0, B_hat, 1.0)), 0.0)
+    neg_entropy_B = (B_hat * log_B).sum(axis=0)
+    if not include_ig:
+        return B_hat, neg_entropy_B
+    kl_B = np.where(alpha_B > 0,
+                    np.log(np.maximum(a0_B, EPS)) - np.log(safe_B)
+                    + digamma(safe_B + 1) - digamma(a0_B + 1), 0.0)
+    return B_hat, neg_entropy_B - (B_hat * kl_B).sum(axis=0)
 
 
 def analytic_efe_action_posterior(alpha_A, alpha_B, q0, goal, horizon,
@@ -93,49 +140,34 @@ def analytic_efe_action_posterior(alpha_A, alpha_B, q0, goal, horizon,
     q0 = np.asarray(q0, dtype=np.float64)
     goal = np.asarray(goal, dtype=np.float64)
     log_goal = np.log(np.maximum(goal / goal.sum(), EPS))
+    _, state_term = obs_terms(alpha_A, include_ig)
+    B_hat, dyn_term = dyn_terms(alpha_B, include_ig)     # (S, S, U), (S, U)
 
-    safe_A = np.where(alpha_A > 0, alpha_A, 1.0)
-    a0_A = alpha_A.sum(axis=1, keepdims=True)
-    A_hat = np.where(alpha_A > 0, alpha_A / np.maximum(a0_A, EPS), 0.0)
-    elog_A = np.where(alpha_A > 0, _dg(safe_A + 1) - _dg(a0_A + 1), 0.0)
-    ambig = -(A_hat * elog_A).sum(axis=(0, 1))
-    kl_A = np.where(alpha_A > 0,
-                    np.log(np.maximum(a0_A, EPS)) - np.log(safe_A)
-                    + _dg(safe_A + 1) - _dg(a0_A + 1), 0.0)
-    ig_A = (A_hat * kl_A).sum(axis=(0, 1))
-    state_term = ambig - ig_A if include_ig else np.zeros_like(ambig)
-
-    safe_B = np.where(alpha_B > 0, alpha_B, 1.0)
-    a0_B = alpha_B.sum(axis=0, keepdims=True)
-    B_hat = np.where(alpha_B > 0, alpha_B / np.maximum(a0_B, EPS), 0.0)
-    log_B = np.where(B_hat > 0, np.log(np.where(B_hat > 0, B_hat, 1.0)), 0.0)
-    kl_B = np.where(alpha_B > 0,
-                    np.log(np.maximum(a0_B, EPS)) - np.log(safe_B)
-                    + _dg(safe_B + 1) - _dg(a0_B + 1), 0.0)
-    ig_B = (B_hat * kl_B).sum(axis=0) if include_ig else np.zeros(
-        alpha_B.shape[1:])
-
+    # All U^H policies rolled out together: q is (P, S), one row per policy
     n_actions = alpha_B.shape[2]
-    policies = list(itertools.product(range(n_actions), repeat=horizon))
+    policies = _policies(n_actions, horizon)
+    q = np.broadcast_to(q0, (len(policies), q0.size)).copy()
     G = np.zeros(len(policies))
-    for i, pi in enumerate(policies):
-        q = q0.copy()
-        g = 0.0
-        for u in pi:
-            joint = B_hat[:, :, u] * q[None, :]
-            q_next = joint.sum(axis=1)
-            g += (joint * log_B[:, :, u]).sum()
-            g += (q_next * state_term).sum()
-            g -= (q * ig_B[:, u]).sum()
-            q = q_next
-        g -= (q * log_goal).sum()
-        G[i] = g
+    for t in range(horizon):
+        u = policies[:, t]
+        G += (q * dyn_term[:, u].T).sum(axis=1)
+        q_next = np.empty_like(q)
+        for a in range(n_actions):          # group policies by action at t
+            rows = u == a
+            q_next[rows] = q[rows] @ B_hat[:, :, a].T
+        q = q_next
+        G += q @ state_term
+    G -= q @ log_goal
     w = np.exp(-(G - G.min()))
-    w /= w.sum()
-    post = np.zeros(n_actions)
-    for i, pi in enumerate(policies):
-        post[pi[0]] += w[i]
-    return post
+    return np.bincount(policies[:, 0], weights=w / w.sum(), minlength=n_actions)
+
+
+@functools.lru_cache(maxsize=None)
+def _policies(n_actions, horizon):
+    """Every open-loop action sequence, (U^H, H); read-only and cached."""
+    pols = np.array(list(itertools.product(range(n_actions), repeat=horizon)))
+    pols.setflags(write=False)
+    return pols
 
 
 
@@ -148,6 +180,11 @@ def _plan(planner, q, alpha_A, alpha_B, goal, h, n_iterations, damping,
         return analytic_efe_action_posterior(
             alpha_A, alpha_B, q, goal, h,
             include_ig=(planner == "EFE"))
+    if planner in SI_PLANNERS:
+        from sophisticated import si_efe_action_posterior  # imports dispatch
+        return si_efe_action_posterior(
+            alpha_A, alpha_B, q, goal, h, learn=(planner == "SI-EFE"),
+            per_step_goal=per_step_goal)
     return sp_efe_planning(
         q, alpha_A, alpha_B, goal, horizon=h, n_iterations=n_iterations,
         damping=damping, per_step_goal=per_step_goal,

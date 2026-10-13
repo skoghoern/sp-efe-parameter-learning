@@ -1,17 +1,8 @@
-"""Dirichlet expected-log tables, the entry point to every conjugate kernel.
+"""Frozen-θ Dirichlet log-tables for the conjugate kernels.
 
-θ is frozen during planning, so its entire influence on the graph collapses into
-two precomputed log-tables per parameter block:
-
-- Geometric (digamma) table: log ᾱ = E_q[log θ] = ψ(α) − ψ(Σ α),
-  replacing every E_{q_θ}[log ·] in the modified kernels.
-- Arithmetic (mean) table:   log α̂ = log(α / Σ α),
-  replacing every arithmetic θ-marginalization in the channel refresh.
-
-The per-entry Jensen gap log_mean − log_geo ≥ 0, large at low counts, is the
-parameter information gain. SP-EFE uses the arithmetic table.
-
-All computation is in log-space, with LOG_ZERO for structural zeros.
+Geometric (digamma) E[log θ] is used in factor functions; arithmetic (mean) log E[θ] is used in channel updates r()
+refresh. Their gap is the parameter information gain (SP-EFE uses arithmetic).
+Structural zeros are LOG_ZERO.
 """
 
 import jax.numpy as jnp
@@ -19,37 +10,21 @@ from jax.scipy.special import digamma
 
 from .sweeps import LOG_ZERO
 
-# Structural-zero tolerance (relative to each Dirichlet's column total). After
-# conjugate count learning, impossible events accumulate denormal "dust" — tiny
-# belief-leak counts (~1e-30..1e-18) added on top of their exact-zero prior. Such
-# entries are NOT real evidence and must stay structural zeros: digamma(α)≈−1/α
-# for α≈1e-38 otherwise explodes the θ-novelty KL to ~1e37 (then NaN) and leaks
-# kernel probability onto impossible transitions. The gap between dust
-# (≲1e-18·α₀) and any genuine count (≳1e-3·α₀) is enormous, so a single relative
-# floor cleanly separates them and leaves exact-zero priors untouched.
+# Counts ≤ rtol · column total are structural zeros. Learned impossible events
+# pick up leakage (~1e-30..1e-18); digamma(α)≈−1/α would explode the
+# novelty KL. Leakage ≪ 1e-6·α₀ ≪ any genuine count.
 STRUCTURAL_ZERO_RTOL = 1e-6
 
 
 def dirichlet_log_tables(alpha, axis=0):
-    """Compute geometric and arithmetic expected-log tables of a Dirichlet collection.
+    """Geometric and arithmetic expected-log tables for independent Dirichlets.
 
-    Treats `alpha` as a collection of independent Dirichlets: one distribution
-    over `axis` per remaining index (e.g. alpha_A (Y, X) with axis=0 is one
-    Dirichlet over y per state x; alpha_B (X', X, U) with axis=0 is one
-    Dirichlet over x' per (x, u) pair).
+    One Dirichlet over `axis` per remaining index. Entries ≤
+    STRUCTURAL_ZERO_RTOL · Σ_axis α are structural zeros (LOG_ZERO).
 
-    Args:
-        alpha: concentration tensor; entries negligible relative to their
-            column total (≤ STRUCTURAL_ZERO_RTOL · Σ_axis α, including exact 0
-            and post-learning denormal "dust") are treated as structural zeros
-        axis: axis along which each Dirichlet is normalized
-
-    Returns:
-        (log_geo, log_mean), same shape as alpha:
-        - log_geo:  ψ(α) − ψ(Σ_axis α), i.e. E_{Dir(α)}[log θ]
-        - log_mean: log(α / Σ_axis α),  i.e. log E_{Dir(α)}[θ]
-        Structural zeros map to LOG_ZERO in both tables. Elementwise
-        log_mean ≥ log_geo, with the gap vanishing as counts grow.
+    Returns (log_geo, log_mean), same shape as alpha:
+        log_geo = ψ(α) − ψ(Σ α) = E[log θ]
+        log_mean = log(α / Σ α) = log E[θ]
     """
     alpha_sum = jnp.sum(alpha, axis=axis, keepdims=True)
     # Relative structural-zero test: drop denormal learned "dust" (see

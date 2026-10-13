@@ -18,14 +18,10 @@ pass also returns the action marginal q(u_t). Planners call these in a
 All internal computation is in log-space; probability-space tensors are accepted
 at the boundary.
 
-Structural-zero invariant
-    Any array named ``log_*`` may contain ``LOG_ZERO`` for structurally
-    impossible entries (zero prior count, forbidden transition). Such entries
-    must be masked with ``is_live`` before any arithmetic other than adding
-    finite terms -- in particular before subtraction (−log r in the dynamics
-    kernel) -- and must be excluded from every expectation
-    (``sp_efe.weighted_log``). In float32, LOG_ZERO + x == LOG_ZERO for any
-    live x, so a masked entry stays masked through the sums.
+``log_*`` arrays may hold ``LOG_ZERO`` for impossible entries. Mask with
+``is_live`` before any arithmetic other than adding a finite term (especially
+−log r) and before every expectation (``sp_efe.weighted_log``). In float32,
+LOG_ZERO + x stays LOG_ZERO, so a masked entry stays masked through the sums.
 """
 
 import jax

@@ -1,52 +1,27 @@
-"""Learning the transition model θ_B: known risky shortcut vs unmapped detour.
+"""Learning θ_B: a known risky shortcut against an unmapped detour.
 
-The paper's experiment is ``--unmapped doors`` at H=7 (Figure 2d-f and the right
-half of Table 1). A planner that never learns is capped at ``gate_p`` = 0.5, and
-optimism is priced out by construction: a flat column spreads the successor over
-all 20 cells, which reaches the goal within the horizon with probability 0.265,
-below the gamble. So the safe route is only available to a planner that explores
-its own model.
+Paper run: ``--unmapped doors`` at H=7 (Figure 2d-f, Table 1 right). A
+non-learner is capped at ``gate_p`` = 0.5. A flat column reaches the goal
+inside the horizon with probability 0.265, below that gamble, so the safe
+route requires exploring the env.
 
-5×4 grid, identity A, B partially known. The mapped shortcut ``→→→→↑``
-ends in a gate that reaches the goal w.p. ``gate_p`` and otherwise drops
-into an absorbing dead end; the deterministic 7-step detour ``↑↑→→→→↓``
-runs through six unmapped cells (24 flat Dirichlet columns). Terminal-only
-preference, shrinking plan depth, argmax, stop at goal / dead end.
+5×4 grid, identity A, B partly known. Shortcut ``→→→→↑`` hits a gate (goal
+w.p. ``gate_p``, else an absorbing dead end). Detour ``↑↑→→→→↓`` is 7
+deterministic steps through six unmapped cells (24 flat columns). Terminal
+preference, shrinking depth, argmax; stop at the goal or the dead end.
 
-Scenarios
----------
-- ``known``   : every B column clamped — the planning ceiling (1.00 detour).
-- ``frozen``  : unmapped columns flat and never updated — the no-learning
-  floor (everyone gambles: ≈ gate_p).
-- ``learn-B`` : unmapped columns flat, Dirichlet counts persist across
-  episodes. The benchmark.
+- ``known``: B clamped — planning ceiling (detour rate 1).
+- ``frozen``: unmapped columns stay flat — no-learning floor (≈ ``gate_p``).
+- ``learn-B``: those columns start flat and counts persist — the benchmark.
 
-Planners: the five MP planners, enumerated ``EFE`` / ``EFE-noamb-noig``
-(4^H policies; H=7 default / H=8 mirror), and ``Random`` (uniform actions,
-learning on).
-
-Layouts (``--layout``): ``default`` (5×4 above) separates coupled from
-``SP-Pref-Plan`` only — uncorrected ``SP-Pref`` walks the index-order detour.
-``mirror`` (6×4: detour ``↑↑←←←←←↓``, no pocket; G at (0,2), top-left unmapped).
-``--action-order`` relabels the action indices (robustness check for tie-break luck).
-``--unmapped doors --layout mirror`` is the WEST-detour doors variant (no pocket).
-
-The paper uses ``--unmapped doors`` / ``cells``, ``--layout mirror`` and
-``--action-order`` (the Appendix C.2 robustness checks). ``--noisy-tv`` and
-``--layout mirror-rest`` are inherited extras that no reported result uses; they
-are off by default and can be ignored on a first read.
-
-Examples
---------
-    # paper: doors variant, learning θ_B (Figure 2d-f, Table 1 right)
-    uv run python run_unmapped_detour.py --unmapped doors --compare \
-        --episodes 300 --n-seeds 3
-    uv run python run_unmapped_detour.py --scenario known
-    uv run python run_unmapped_detour.py --scenario learn-B --episodes 200 --n-seeds 5
-    uv run python run_unmapped_detour.py --compare
-    uv run python run_unmapped_detour.py --compare --layout mirror --episodes 300 --n-seeds 3
-    uv run python run_unmapped_detour.py --layout mirror --action-order WSEN --scenario learn-B
-    uv run python run_unmapped_detour.py --scenario learn-B --planners SP-EFE-dyn SP-Pref-Plan Random
+Planners are the five MP planners, enumerated ``EFE`` / ``EFE-noamb-noig``
+(4^H; H=7, or H=8 on ``mirror``), and ``Random``. On ``default``, uncorrected
+``SP-Pref`` already walks the index-order detour, so that layout only
+separates the coupled planner from ``SP-Pref-Plan``. ``mirror`` is the 6×4
+west detour (``↑↑←←←←←↓``, no pocket; G at (0, 2)). ``--action-order``
+permutes action indices. Appendix C.2 is ``doors`` / ``cells``, ``mirror``,
+and ``--action-order``. ``--noisy-tv`` and ``mirror-rest`` are unused and off
+by default.
 """
 
 from __future__ import annotations
@@ -72,15 +47,17 @@ from agent import (
 )
 from dispatch import (
     DEFAULT_DAMPING, DEFAULT_ITERS, IDENTIFIED_MASS, PRETTY, STYLE,
-    PLANNERS as MP_PLANNERS, _plan,
+    PLANNERS as MP_PLANNERS, SI_PLANNERS, _plan,
 )
+from figures.paths import split_stem
 from run_fog_walls import _trailing_mean
 
 MAX_ANALYTIC_POLICIES = 4 ** 8  # mirror detour is H=8 (65536 policies)
 STATE_ANALYTICS = ("EFE", "EFE-noamb-noig")
 RANDOM = "Random"
 # The ``-DeltaA-DeltaB`` labels (Δ_A / Δ_B dropped, channels kept) are ablations.
-ALL_PLANNERS = MP_PLANNERS + SP_EFE_IGC_PLANNERS + STATE_ANALYTICS + (RANDOM,)
+ALL_PLANNERS = (MP_PLANNERS + SP_EFE_IGC_PLANNERS + STATE_ANALYTICS
+                + SI_PLANNERS + (RANDOM,))
 DEFAULT_PLANNERS = MP_PLANNERS + (RANDOM,)
 SCENARIOS = ("known", "frozen", "learn-B")
 DEFAULT_EPISODES = {"known": 20, "frozen": 20, "learn-B": 200}
@@ -219,6 +196,7 @@ def run_episodes(planner, grid=None, scenario="learn-B", n_episodes=None,
                       and all(s in grid.detour_cells for s in states))
         results.append(dict(
             episode=ep, outcome=outcome, steps=steps_used, path=tuple(path),
+            states=tuple(states),
             q0=None if q0 is None else np.asarray(q0),
             via_gate=grid.gate_idx in states,
             via_tv=(grid.noisy_tv and grid.tv_idx in states),
@@ -360,7 +338,9 @@ def compare(grid, planners, scenario, n_episodes, seeds,
 
 
 def _save(runs, out, grid, scenario, n_episodes):
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    data_stem, fig_stem = split_stem(out)
+    os.makedirs(os.path.dirname(data_stem) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(fig_stem) or ".", exist_ok=True)
     payload = dict(scenario=scenario, n_episodes=n_episodes,
                    layout=grid.layout, action_order=grid.action_order,
                    gate_p=grid.gate_p, noisy_tv=grid.noisy_tv,
@@ -387,9 +367,9 @@ def _save(runs, out, grid, scenario, n_episodes):
             [[x["n_unmapped_cols"] for x in r["results"]] for r in rs], int)
         payload[f"{planner}|ident"] = np.array(
             [[x["ident"] for x in r["results"]] for r in rs], int)
-    np.savez(f"{out}.npz", **payload)
-    _plot(runs, out, grid=grid, n_episodes=n_episodes)
-    print(f"wrote {out}.png / {out}.pdf / {out}.npz")
+    np.savez(f"{data_stem}.npz", **payload)
+    _plot(runs, fig_stem, grid=grid, n_episodes=n_episodes)
+    print(f"wrote {fig_stem}.png / {fig_stem}.pdf / {data_stem}.npz")
 
 
 def _plot(runs, out, grid, n_episodes):
@@ -456,8 +436,8 @@ def main():
                          "(6x4, WEST detour, G at (0,2), no pocket); "
                          "'mirror-nopocket' is an alias of mirror")
     ap.add_argument("--depict", action="store_true",
-                    help="save layout PNGs (default and mirror) to figures/ "
-                         "and exit")
+                    help="save layout PNGs (default and mirror) to "
+                         "figures/figures/ and exit")
     ap.add_argument("--unmapped", choices=UNMAPPED_MODES, default=DEFAULT_UNMAPPED_MODE,
                     help="'cells': every column of each unmapped cell is flat; "
                          "'doors': only the detour's own (cell, action) pairs "
@@ -489,7 +469,9 @@ def main():
     ap.add_argument("--planners", nargs="+", choices=ALL_PLANNERS, default=None,
                     help=f"default: {' '.join(DEFAULT_PLANNERS)}")
     ap.add_argument("--out", default=None,
-                    help="prefix for png/pdf/npz (empty string skips save)")
+                    help="prefix for the npz and the plots (empty string skips "
+                         "save). A prefix under figures/ is split into "
+                         "figures/data and figures/figures")
     args = ap.parse_args()
     if args.depict:
         from environments.unmapped_detour import save_layout_figures
@@ -512,7 +494,7 @@ def main():
                f"{'' if grid.action_order == ACTION_LETTERS else '_' + grid.action_order}"
                f"{'_tv' if grid.noisy_tv else ''}_{scenario}_H"
                f"{args.horizon if args.horizon is not None else grid.detour_length}")
-        out = (os.path.join("figures", tag) if args.out is None
+        out = (os.path.join("figures", "data", tag) if args.out is None
                else (f"{args.out}_{scenario}" if args.out else None))
         compare(grid, planners, scenario, n_eps, seeds,
                 max_steps=args.steps, horizon=args.horizon,

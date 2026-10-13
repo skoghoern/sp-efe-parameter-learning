@@ -1,33 +1,18 @@
 """Learning the observation model θ_A: SP-EFE vs the preference baselines.
 
-The paper's experiment is ``fog-walls`` at H=8 (Figure 2a-c and the left half of
+The paper's experiment is fog-walls at H=8 (Figure 2a-c and the left half of
 Table 1). The direct 4-step route crosses a drift cell and an ambiguous fog
 block; the 8-step top row identifies every state. Only a planner that *knows*
 the top row is unambiguous will pay the extra four steps for it, so learning θ_A
 changes the route -- which is the point.
 
-The maze is ported from the RxInferExamples.jl notebook ``EFE Minimization via
-Message Passing.ipynb``. Three layouts share its tensor builders:
-
-- ``fog-walls`` (default, 5×5): the paper's benchmark — the fog layout with its
-  four sinks replaced by walls, so mislocalization costs bumps rather than the
-  episode, and a novelty-driven learner survives long enough to learn.
-- ``fog`` (5×5): the notebook's fog layout, four sinks, H=11. The paper defines
-  fog-walls relative to this one.
-- ``trap`` (5×5): the notebook's conveyor + trap, safe top row = 8, H=11.
+The maze is the 5×5 fog-walls layout (layout horizon 11; the paper uses H=8).
+Four interior cells are impassable walls, so mislocalization costs bumps
+rather than the episode, and a novelty-driven learner survives long enough
+to learn which cells are foggy.
 
 Planners come from ``dispatch.py``; the enumerated analytic ones need 4^H
-policies and so are impractical at these horizons.
-
-Examples
---------
-    # paper: fog-walls, learning θ_A (Figure 2a-c, Table 1 left)
-    uv run python run_fog_walls.py --compare --scenario learn-A \
-        --maze fog-walls --horizon 8 --episodes 100 --n-seeds 5
-    # the known-A/B control of Appendix C.2 (30/30 vs 18/30)
-    uv run python run_fog_walls.py --compare --scenario known --horizon 8 --n-seeds 30
-    uv run python run_fog_walls.py --scenario known
-    uv run python run_fog_walls.py --maze fog --scenario known
+policies, so they run up to H=8 (65536 policies).
 """
 
 from __future__ import annotations
@@ -50,15 +35,16 @@ from agent import (
     horizon_at, matrix_error, posterior_mean_A, posterior_mean_B,
     update_counts_A, update_counts_B,
 )
-from dispatch import ALL_PLANNERS as BASE_PLANNERS, _plan
+from dispatch import ALL_PLANNERS as BASE_PLANNERS, SI_PLANNERS, _plan
+from figures.paths import split_stem
 from viz import save_gif
 
 # agent.FLAT (0.1) is the Dirichlet prior count for the reported learn-A runs.
 DEFAULT_ITERS = 100
 DEFAULT_DAMPING = 0.5
-DEFAULT_HORIZON = 11         # 5×5 layouts; mini layouts set meta["horizon"]=4
+DEFAULT_HORIZON = 11         # fog-walls layout horizon; the paper uses H=8
 DEFAULT_SHRINKING_HORIZON = True
-DEFAULT_STEPS = 25           # capped at horizon under shrinking H
+DEFAULT_FIXED_STEPS = 25     # episode length under a fixed H; shrinking H uses T = H
 DEFAULT_EPISODES = {"known": 3, "learn-A": 60, "learn-B": 20}
 DEFAULT_PREFERENCE = 4.0
 COMPARE_KNOWN_SEEDS = 10
@@ -73,8 +59,8 @@ MP_PLANNERS = ("SP-EFE-dyn", "SP-EFE", "SP-EFE-DeltaB",
 RANDOM = "Random"
 ABLATION_PLANNERS = SP_EFE_IGC_PLANNERS + (RANDOM,)
 ANALYTIC_PLANNERS = ("EFE", "EFE-noamb-noig")
-PLANNERS = MP_PLANNERS + ANALYTIC_PLANNERS + ABLATION_PLANNERS
-MAX_ANALYTIC_POLICIES = 20_000
+PLANNERS = MP_PLANNERS + ANALYTIC_PLANNERS + SI_PLANNERS + ABLATION_PLANNERS
+MAX_ANALYTIC_POLICIES = 4 ** 8  # fog-walls is H=8 (65536 policies)
 
 
 def _default_compare_planners(mazes, horizon=None):
@@ -107,7 +93,7 @@ def _check_planner(planner, horizon):
     if planner not in BASE_PLANNERS + ABLATION_PLANNERS:
         raise ValueError(
             f"unknown planner {planner!r}; choose from {PLANNERS}")
-    if planner not in MP_PLANNERS + ABLATION_PLANNERS:
+    if planner in ANALYTIC_PLANNERS:
         n = 4 ** int(horizon)
         if n > MAX_ANALYTIC_POLICIES:
             raise ValueError(
@@ -115,19 +101,22 @@ def _check_planner(planner, horizon):
                 f"use an MP planner (max {MAX_ANALYTIC_POLICIES})")
 
 
-def run_scenario(scenario, n_episodes=None, max_steps=DEFAULT_STEPS,
+def run_scenario(scenario, n_episodes=None, max_steps=None,
                  horizon=None, n_iterations=DEFAULT_ITERS,
                  damping=DEFAULT_DAMPING, seed=0, prior_count=FLAT,
                  preference=DEFAULT_PREFERENCE,
                  per_step_goal=None, stop_at_goal=None,
                  action_select=None,
                  shrinking_horizon=DEFAULT_SHRINKING_HORIZON,
-                 planner="SP-EFE", maze="trap", quiet=False,
+                 planner="SP-EFE", maze="fog-walls", quiet=False,
                  collect_frames=True):
     """Run one scenario; returns dict with frames and metrics.
 
-    ``horizon`` defaults to the layout's planning depth (11 on 5×5, 4 on
-    mini). Analytic EFE is allowed only when 4^H ≤ ``MAX_ANALYTIC_POLICIES``.
+    ``horizon`` defaults to the layout's planning depth (11). Analytic EFE
+    is allowed only when 4^H ≤ ``MAX_ANALYTIC_POLICIES``.
+    ``max_steps`` is the episode length T; by default T = H under a
+    shrinking horizon (the paper's protocol) and ``DEFAULT_FIXED_STEPS``
+    otherwise. Passing it decouples T from H, e.g. for a horizon sweep.
     """
     if scenario not in ("known", "learn-A", "learn-B"):
         raise ValueError(scenario)
@@ -164,13 +153,14 @@ def run_scenario(scenario, n_episodes=None, max_steps=DEFAULT_STEPS,
         preference=preference, goal_state=goal_state, n_states=n_states))
     rng = np.random.default_rng(seed)
     env = StochasticMazeEnv(rng=rng, maze=maze, A=A_true[0], B=B_true)
-    if shrinking_horizon:
-        max_steps = min(max_steps, horizon)
+    if max_steps is None:
+        max_steps = horizon if shrinking_horizon else DEFAULT_FIXED_STEPS
+    max_steps = int(max_steps)
 
     frames, results = [], []
     if not quiet:
         print(f"stochastic-maze/{maze}/{scenario} — {planner}  H={horizon}"
-              f"{'↓' if shrinking_horizon else ''}"
+              f"{'↓' if shrinking_horizon else ''}  T={max_steps}"
               f"  iters={n_iterations}  damping={damping}"
               f"  per_step_goal={per_step_goal}  action_select={action_select}"
               f"  prior_count={prior_count}  episodes={n_episodes}")
@@ -334,17 +324,17 @@ def _agg_learn_a(run):
     return a
 
 
-def compare_learn_a(mazes=("trap", "fog"), **kwargs):
+def compare_learn_a(mazes=("fog-walls",), **kwargs):
     """Multi-seed learn-A (flat A, B known). Analytics included when 4^H fits."""
     return compare_learn("learn-A", mazes=mazes, **kwargs)
 
 
-def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
+def compare_learn(scenario, mazes=("fog-walls",), planners=None,
                    n_episodes=None, n_seeds=COMPARE_LEARN_A_SEEDS,
                    start_seed=0, n_iterations=DEFAULT_ITERS,
                    damping=DEFAULT_DAMPING, horizon=None,
                    preference=DEFAULT_PREFERENCE, prior_count=FLAT,
-                   shrinking_horizon=True, out=None):
+                   shrinking_horizon=True, max_steps=None, out=None):
     """Multi-seed learn-A (flat A, B known) or learn-B (A known, flat B)."""
     if scenario not in ("learn-A", "learn-B"):
         raise ValueError(f"scenario must be learn-A or learn-B, got {scenario}")
@@ -356,6 +346,7 @@ def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
     print(f"stochastic-maze compare {scenario}  mazes={','.join(mazes)}  "
           f"H={horizon if horizon is not None else 'layout'}"
           f"{'↓' if shrinking_horizon else ''}  "
+          f"T={max_steps if max_steps is not None else 'default'}  "
           f"seeds={n_seeds}  eps={n_episodes}  prior={prior_count}")
     print(f"planners: {', '.join(planners)}")
     print()
@@ -372,7 +363,7 @@ def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
                     maze=maze, seed=seed, quiet=True, collect_frames=False,
                     n_iterations=n_iterations, damping=damping,
                     horizon=horizon, preference=preference,
-                    prior_count=prior_count,
+                    prior_count=prior_count, max_steps=max_steps,
                     shrinking_horizon=shrinking_horizon)
                 runs[maze][planner].append(run)
                 b = _agg_learn_a(run)
@@ -428,10 +419,12 @@ def compare_learn(scenario, mazes=("trap", "fog"), planners=None,
                         [r["top_row"] for r in res])
                     payload[f"{tag}|sink"] = np.array(
                         [r["sink_end"] for r in res])
-        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-        np.savez(out, **payload)
-        print(f"saved {out}")
-        _plot_learn(runs, os.path.splitext(out)[0], n_episodes, scenario)
+        data_stem, fig_stem = split_stem(os.path.splitext(out)[0])
+        npz_path = f"{data_stem}.npz"
+        os.makedirs(os.path.dirname(npz_path) or ".", exist_ok=True)
+        np.savez(npz_path, **payload)
+        print(f"saved {npz_path}")
+        _plot_learn(runs, fig_stem, n_episodes, scenario)
     return runs
 
 
@@ -494,19 +487,20 @@ def _plot_learn(runs, out, n_episodes, scenario="learn-A"):
         axes[1].set_title("table error")
         fig.tight_layout()
         stem = f"{out}_{maze}" if len(runs) > 1 else out
+        os.makedirs(os.path.dirname(stem) or ".", exist_ok=True)
         fig.savefig(f"{stem}.png")
         fig.savefig(f"{stem}.pdf")
         plt.close(fig)
         print(f"wrote {stem}.png / {stem}.pdf")
 
 
-def compare_mazes(mazes=("trap", "fog"), planners=None,
+def compare_mazes(mazes=("fog-walls",), planners=None,
                   n_known_seeds=COMPARE_KNOWN_SEEDS,
                   n_learn_episodes=COMPARE_LEARN_B_EPISODES,
                   start_seed=0, n_iterations=DEFAULT_ITERS,
                   damping=DEFAULT_DAMPING, horizon=None,
                   preference=DEFAULT_PREFERENCE, prior_count=FLAT,
-                  shrinking_horizon=True):
+                  shrinking_horizon=True, max_steps=None):
     """Known (multi-seed) and learn-B (one seed, multi-ep) on each maze."""
     mazes = tuple(mazes)
     planners = tuple(planners or _default_compare_planners(mazes, horizon))
@@ -528,7 +522,7 @@ def compare_mazes(mazes=("trap", "fog"), planners=None,
                     seed=start_seed + k, quiet=True, collect_frames=False,
                     n_iterations=n_iterations, damping=damping,
                     horizon=horizon, preference=preference,
-                    prior_count=prior_count,
+                    prior_count=prior_count, max_steps=max_steps,
                     shrinking_horizon=shrinking_horizon))
             a = _agg_known(known[maze][planner])
             steps = "—" if a["steps"] is None else f"{a['steps']:.1f}"
@@ -541,7 +535,7 @@ def compare_mazes(mazes=("trap", "fog"), planners=None,
                 maze=maze, seed=start_seed, quiet=True, collect_frames=False,
                 n_iterations=n_iterations, damping=damping,
                 horizon=horizon, preference=preference,
-                prior_count=prior_count,
+                prior_count=prior_count, max_steps=max_steps,
                 shrinking_horizon=shrinking_horizon)
             b = _agg_learn(learn[maze][planner])
             first = "never" if b["first"] is None else str(b["first"])
@@ -582,11 +576,8 @@ def main():
                     choices=("known", "learn-A", "learn-B", "all"))
     ap.add_argument("--planner", default="SP-EFE", choices=PLANNERS,
                     help="MP planner (analytic EFE is 4^H; skipped at H=11)")
-    ap.add_argument("--maze", default="fog-walls",
-                    choices=(*MAZE_LAYOUTS, "both"),
-                    help="fog-walls (the paper's learn-A benchmark: the fog "
-                         "maze with non-lethal walls instead of sinks), fog, "
-                         "trap; both = trap+fog (compare only)")
+    ap.add_argument("--maze", default="fog-walls", choices=MAZE_LAYOUTS,
+                    help="fog-walls, the paper's learn-A benchmark")
     ap.add_argument("--compare", action="store_true",
                     help="all planners that fit 4^H; known+learn-B, or "
                          "multi-seed learn-A / learn-B if --scenario is set; "
@@ -598,9 +589,11 @@ def main():
     ap.add_argument("--episodes", type=int, default=None,
                     help="default: 3 (known), 60 (learn-A), 200 "
                          "(--compare learn-B), 20 (learn-B GIF)")
-    ap.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    ap.add_argument("--steps", type=int, default=None,
+                    help="episode length T (default: H under the shrinking "
+                         f"horizon, {DEFAULT_FIXED_STEPS} with --fixed-horizon)")
     ap.add_argument("--horizon", type=int, default=None,
-                    help="planning depth (default: layout, 11 on 5x5, 4 on mini)")
+                    help="planning depth (default: the layout horizon, 11)")
     ap.add_argument("--iters", type=int, default=DEFAULT_ITERS)
     ap.add_argument("--damping", type=float, default=DEFAULT_DAMPING)
     ap.add_argument("--seed", type=int, default=0)
@@ -622,8 +615,8 @@ def main():
                     help="plan with a fixed H every step. The default shrinks "
                          "H to the time remaining")
     ap.add_argument("--save", default=None, metavar="PATH",
-                    help="GIF path (default figures/"
-                         "stochastic_maze_<scenario>_<planner>.gif)")
+                    help="GIF path (default figures/figures/"
+                         "stochastic_maze_<maze>_<scenario>_<planner>.gif)")
     ap.add_argument("--no-gif", action="store_true")
     args = ap.parse_args()
 
@@ -631,20 +624,15 @@ def main():
     planners = (tuple(args.compare_planners) if args.compare_planners
                 else None)
 
-    if args.maze == "both":
-        mazes = ("trap", "fog")
-    else:
-        mazes = (args.maze,)
+    mazes = (args.maze,)
 
     if args.compare:
         if args.scenario in ("learn-A", "learn-B"):
             tag = "learnA" if args.scenario == "learn-A" else "learnB"
             if args.save:
                 save = args.save
-            elif set(mazes) == {"trap", "fog"}:
-                save = f"figures/stochastic_maze_5x5_{tag}_mp.npz"
             else:
-                save = (f"figures/stochastic_maze_"
+                save = (f"figures/data/stochastic_maze_"
                         f"{'+'.join(mazes)}_{tag}.npz")
             n_eps = args.episodes or (
                 DEFAULT_EPISODES["learn-A"] if args.scenario == "learn-A"
@@ -657,7 +645,8 @@ def main():
                 start_seed=args.seed, n_iterations=args.iters,
                 damping=args.damping, horizon=args.horizon,
                 preference=args.preference, prior_count=args.prior_count,
-                shrinking_horizon=not args.fixed_horizon, out=save)
+                shrinking_horizon=not args.fixed_horizon,
+                max_steps=args.steps, out=save)
         else:
             compare_mazes(
                 mazes=mazes, planners=planners,
@@ -667,11 +656,9 @@ def main():
                 start_seed=args.seed, n_iterations=args.iters,
                 damping=args.damping, horizon=args.horizon,
                 preference=args.preference, prior_count=args.prior_count,
-                shrinking_horizon=not args.fixed_horizon)
+                shrinking_horizon=not args.fixed_horizon,
+                max_steps=args.steps)
         return
-
-    if args.maze == "both":
-        raise SystemExit("--maze both is only valid with --compare")
 
     scenarios = (["known", "learn-A", "learn-B"]
                  if args.scenario == "all" else [args.scenario])
@@ -691,7 +678,7 @@ def main():
             planner=args.planner, maze=args.maze)
         if not args.no_gif:
             path = args.save or (
-                f"figures/stochastic_maze_{args.maze}_{scenario}_"
+                f"figures/figures/stochastic_maze_{args.maze}_{scenario}_"
                 f"{args.planner}.gif")
             save_gif(result, path)
         print()
